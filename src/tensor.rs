@@ -1,10 +1,17 @@
+//! Tensor utilities
 use std::sync::Arc;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Tensor {
-    pub name: String,
+    pub name: Arc<str>,
     pub dims: Arc<[i64]>,
     pub data: Arc<[f32]>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TensorSpec {
+    pub name: Arc<str>,
+    pub dims: Arc<[i64]>,
 }
 
 impl Tensor {
@@ -15,7 +22,7 @@ impl Tensor {
             "Tensor dimensions do not match data length"
         );
         Self {
-            name,
+            name: Arc::from(name),
             dims: Arc::from(dims),
             data: Arc::from(data),
         }
@@ -26,7 +33,7 @@ impl Tensor {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
-    pub fn shape(&self) -> &[i64] {
+    pub fn dims(&self) -> &[i64] {
         &self.dims
     }
 }

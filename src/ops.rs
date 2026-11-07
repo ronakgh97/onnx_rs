@@ -7,6 +7,14 @@ pub enum AttributesDataKind {
     Ints,
 }
 
+#[derive(Clone, Debug)]
+pub enum AttributesDataValue {
+    F32(f32),
+    I64(i64),
+    Str(String),
+    Ints(Vec<i64>),
+}
+
 impl AttributesDataKind {
     pub fn name(self) -> &'static str {
         match self {

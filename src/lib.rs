@@ -2,19 +2,14 @@ mod ops;
 mod proto;
 mod tensor;
 
-pub use crate::ops::{AttributesDataKind, Operator};
+pub use crate::ops::{AttributesDataKind, AttributesDataValue, Operator};
 use crate::proto::{ModelProto, ValueInfoProto};
-pub use crate::tensor::Tensor;
+pub use crate::tensor::{Tensor, TensorSpec};
 use anyhow::{Result, anyhow};
 use prost::Message;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct Value {
-    pub name: String,
-    pub dims: Vec<i64>,
-}
+use std::sync::Arc;
 
 #[derive(Clone, Debug)]
 pub struct Node {
@@ -22,23 +17,15 @@ pub struct Node {
     pub name: String,
     pub inputs: Vec<String>,
     pub outputs: Vec<String>,
-    pub attrs: Vec<(&'static str, AttrValue)>,
-}
-
-#[derive(Clone, Debug)]
-pub enum AttrValue {
-    F32(f32),
-    I64(i64),
-    Str(String),
-    Ints(Vec<i64>),
+    pub attrs: Vec<(&'static str, AttributesDataValue)>,
 }
 
 #[derive(Clone, Debug)]
 pub struct Model {
     pub ir_version: i64,
     pub opset: i64,
-    pub inputs: Vec<Value>,
-    pub outputs: Vec<Value>,
+    pub inputs: Vec<TensorSpec>,
+    pub outputs: Vec<TensorSpec>,
     pub initializers: Vec<Tensor>,
     pub nodes: Vec<Node>,
 }
@@ -198,12 +185,12 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
             )
         };
 
-        defined.insert(tensor.name.clone());
+        defined.insert(tensor.name.to_string());
         initializers.push(tensor);
     }
 
     // validate & collect graph inputs
-    let mut inputs: Vec<Value> = Vec::with_capacity(graph.input.len());
+    let mut inputs: Vec<TensorSpec> = Vec::with_capacity(graph.input.len());
     for (i, vi) in graph.input.iter().enumerate() {
         if vi.name.is_empty() {
             return Err(anyhow!("graph input #{i} has no name"));
@@ -215,12 +202,12 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
             continue;
         }
         let value = read_declared_value(vi, "graph input")?;
-        defined.insert(value.name.clone());
+        defined.insert(value.name.to_string());
         inputs.push(value);
     }
 
     // validate & collect graph outputs
-    let mut outputs: Vec<Value> = Vec::with_capacity(graph.output.len());
+    let mut outputs: Vec<TensorSpec> = Vec::with_capacity(graph.output.len());
     for vo in &graph.output {
         if vo.name.is_empty() {
             return Err(anyhow!("graph output has no name"));
@@ -272,7 +259,7 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
         }
 
         // validate & collect node attributes
-        let mut attrs: Vec<(&'static str, AttrValue)> = vec![];
+        let mut attrs: Vec<(&'static str, AttributesDataValue)> = vec![];
         for a in &np.attribute {
             let Some(&(name, kind)) = spec.attrs.iter().find(|(n, _)| *n == a.name.as_str()) else {
                 return Err(anyhow!(
@@ -282,15 +269,15 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
                 ));
             };
             let attr = match (kind, &a.f, &a.i, &a.s, &a.ints) {
-                (AttributesDataKind::F32, Some(f), _, _, _) => AttrValue::F32(*f),
-                (AttributesDataKind::I64, _, Some(i), _, _) => AttrValue::I64(*i),
+                (AttributesDataKind::F32, Some(f), _, _, _) => AttributesDataValue::F32(*f),
+                (AttributesDataKind::I64, _, Some(i), _, _) => AttributesDataValue::I64(*i),
                 (AttributesDataKind::Str, _, _, Some(s), _) => match String::from_utf8(s.clone()) {
-                    Ok(st) => AttrValue::Str(st),
+                    Ok(st) => AttributesDataValue::Str(st),
                     Err(_) => {
                         return Err(anyhow!("{label}: attribute '{name}' is not valid utf8"));
                     }
                 },
-                (AttributesDataKind::Ints, _, _, _, _) => AttrValue::Ints(a.ints.clone()),
+                (AttributesDataKind::Ints, _, _, _, _) => AttributesDataValue::Ints(a.ints.clone()),
                 _ => {
                     return Err(anyhow!(
                         "{label}: attribute '{}' does not carry a {} payload",
@@ -309,7 +296,7 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
             if producers.insert(oname.clone(), i).is_some() {
                 return Err(anyhow!("tensor '{oname}': produced by more than one node"));
             }
-            defined.insert(oname.clone());
+            defined.insert(oname.to_string());
         }
 
         nodes.push(Node {
@@ -334,7 +321,7 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
                     ));
                 }
                 Some(_) => {}
-                None if !defined.contains(inp) => {
+                None if !defined.contains(inp.as_str()) => {
                     return Err(anyhow!(
                         "tensor '{inp}': consumed by node#{i} but never defined"
                     ));
@@ -360,8 +347,8 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
     })
 }
 
-fn read_declared_value(vi: &ValueInfoProto, field: &str) -> Result<Value> {
-    let name = &vi.name;
+fn read_declared_value(vi: &ValueInfoProto, field: &str) -> Result<TensorSpec> {
+    let name = vi.name.as_str();
     let Some(tt) = vi.type_.as_ref().and_then(|t| t.tensor_type.as_ref()) else {
         return Err(anyhow!("{field} '{name}': no tensor type declared"));
     };
@@ -392,9 +379,9 @@ fn read_declared_value(vi: &ValueInfoProto, field: &str) -> Result<Value> {
             }
         }
     }
-    Ok(Value {
-        name: name.clone(),
-        dims,
+    Ok(TensorSpec {
+        name: Arc::from(name),
+        dims: Arc::from(dims),
     })
 }
 
