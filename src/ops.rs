@@ -31,9 +31,8 @@ pub struct OperatorSpec {
 pub enum Operator {
     Gemm, MatMul, Conv, MaxPool,
     AveragePool, Relu, Sigmoid, Clip,
-    DepthToSpace, Flatten, Reshape, Transpose,
+    DepthToSpace, Flatten, Transpose, Softmax,
     Add, Sub, Mul, Div,
-    Softmax, ArgMax, Shape,
 }
 
 impl Operator {
@@ -49,15 +48,12 @@ impl Operator {
             "Clip" => Operator::Clip,
             "DepthToSpace" => Operator::DepthToSpace,
             "Flatten" => Operator::Flatten,
-            "Reshape" => Operator::Reshape,
             "Transpose" => Operator::Transpose,
             "Add" => Operator::Add,
             "Sub" => Operator::Sub,
             "Mul" => Operator::Mul,
             "Div" => Operator::Div,
             "Softmax" => Operator::Softmax,
-            "ArgMax" => Operator::ArgMax,
-            "Shape" => Operator::Shape,
             _ => return None,
         };
         Some(op)
@@ -76,15 +72,12 @@ impl Operator {
             Operator::Clip => "Clip",
             Operator::DepthToSpace => "DepthToSpace",
             Operator::Flatten => "Flatten",
-            Operator::Reshape => "Reshape",
             Operator::Transpose => "Transpose",
             Operator::Add => "Add",
             Operator::Sub => "Sub",
             Operator::Mul => "Mul",
             Operator::Div => "Div",
             Operator::Softmax => "Softmax",
-            Operator::ArgMax => "ArgMax",
-            Operator::Shape => "Shape",
         }
     }
 
@@ -189,12 +182,6 @@ impl Operator {
                 attrs: &[("axis", AttributesDataKind::I64)],
             },
             // 14 = allowzero attribute added
-            Operator::Reshape => OperatorSpec {
-                min_opset: 14,
-                arity_in: (2, 2),
-                arity_out: (1, 1),
-                attrs: &[("allowzero", AttributesDataKind::I64)],
-            },
             Operator::Transpose => OperatorSpec {
                 min_opset: 13,
                 arity_in: (1, 1),
@@ -232,22 +219,6 @@ impl Operator {
                 arity_in: (1, 1),
                 arity_out: (1, 1),
                 attrs: &[("axis", AttributesDataKind::I64)],
-            },
-            Operator::ArgMax => OperatorSpec {
-                min_opset: 13,
-                arity_in: (1, 1),
-                arity_out: (1, 1),
-                attrs: &[
-                    ("axis", AttributesDataKind::I64),
-                    ("keepdims", AttributesDataKind::I64),
-                    ("select_last_index", AttributesDataKind::I64),
-                ],
-            },
-            Operator::Shape => OperatorSpec {
-                min_opset: 13,
-                arity_in: (1, 1),
-                arity_out: (1, 1),
-                attrs: &[],
             },
         }
     }
