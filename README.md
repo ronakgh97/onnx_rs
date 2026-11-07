@@ -1,0 +1,1 @@
+Minimal onnx runtime for running f32-only models on x86_64 cpus

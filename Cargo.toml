@@ -1,0 +1,13 @@
+[package]
+name = "onnx-rs"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "onnx_rs"
+path = "src/lib.rs"
+
+[dependencies]
+prost = "0.14.4"
+anyhow = "1.0.104"
+blas-rs = "1.1.0-alpha.2"
