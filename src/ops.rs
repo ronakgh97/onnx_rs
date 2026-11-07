@@ -26,27 +26,14 @@ pub struct OperatorSpec {
     pub attrs: &'static [(&'static str, AttributesDataKind)],
 }
 
+#[rustfmt::skip]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, PartialOrd, Ord)]
 pub enum Operator {
-    Gemm,
-    MatMul,
-    Conv,
-    MaxPool,
-    AveragePool,
-    Relu,
-    Sigmoid,
-    Clip,
-    DepthToSpace,
-    Flatten,
-    Reshape,
-    Transpose,
-    Add,
-    Sub,
-    Mul,
-    Div,
-    Softmax,
-    ArgMax,
-    Shape,
+    Gemm, MatMul, Conv, MaxPool,
+    AveragePool, Relu, Sigmoid, Clip,
+    DepthToSpace, Flatten, Reshape, Transpose,
+    Add, Sub, Mul, Div,
+    Softmax, ArgMax, Shape,
 }
 
 impl Operator {
