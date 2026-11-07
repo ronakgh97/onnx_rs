@@ -65,6 +65,8 @@ pub struct AttributeProto {
     pub floats: Vec<f32>,
     #[prost(int64, repeated, tag = "8")]
     pub ints: Vec<i64>,
+    #[prost(int32, optional, tag = "20")]
+    pub type_: Option<i32>,
 }
 
 #[derive(Clone, PartialEq, Message)]

@@ -10,7 +10,6 @@ use prost::Message;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-/// A declared graph value (input/output): name + concrete shape, f32.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Value {
     pub name: String,
@@ -114,24 +113,28 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
             return Err(anyhow!("initializer #{i} has no name"));
         }
         if !init_names.insert(tensor.name.clone()) {
-            return Err(anyhow!("initializer '{}': duplicate", tensor.name));
+            return Err(anyhow!("initializer: '{}' is a duplicate", tensor.name));
         }
+        // initializer must be f32 only
         if tensor.data_type != 1 {
-            // initializer must be f32 only
-            return Err(anyhow!("initializer '{}': is not f32 dtype", tensor.name,));
+            return Err(anyhow!("initializer: '{}' is not f32 dtype", tensor.name));
         }
 
+        // check negative dim & numel overflows
         let mut numel: u64 = 1;
         for (di, &d) in tensor.dims.iter().enumerate() {
             if d < 0 {
-                return Err(anyhow!("initializer '{}': negative dim {di}", tensor.name));
+                return Err(anyhow!(
+                    "initializer: '{}' encountered negative dim value: {d} at index dim[{di}]",
+                    tensor.name
+                ));
             }
-            numel = numel
-                .checked_mul(d as u64)
-                .ok_or_else(|| anyhow!("initializer '{}': numel overflows", tensor.name))?;
+            numel = numel.checked_mul(d as u64).ok_or_else(|| {
+                anyhow!("initializer: '{}' num of elements overflows", tensor.name)
+            })?;
         }
 
-        // exactly one storage field, holding f32
+        // collect storage field sources
         let sources: u64 = [
             !tensor.raw_data.is_empty(),
             !tensor.float_data.is_empty(),
@@ -141,43 +144,49 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
         .into_iter()
         .map(|b| b as u64)
         .sum();
-        if sources > 1 {
-            return Err(anyhow!(
-                "initializer '{}': more than one storage field",
-                tensor.name
-            ));
+
+        // initializer must have exactly one storage field
+        match sources {
+            0 => {
+                return Err(anyhow!(
+                    "initializer: '{}' {numel} elements, but no data, external storage is not supported",
+                    tensor.name
+                ));
+            }
+            1 => {}
+            _ => {
+                return Err(anyhow!(
+                    "initializer: '{}' more than one storage field",
+                    tensor.name
+                ));
+            }
         }
-        if sources == 0 {
-            return Err(anyhow!(
-                "initializer '{}': {numel} elements, but no data, external storage is not supported",
-                tensor.name
-            ));
-        }
+
+        // initializer must not have int32/int64 data
         if !tensor.int32_data.is_empty() || !tensor.int64_data.is_empty() {
             return Err(anyhow!(
-                "initializer '{}': data in int32/int64 field, only f32 is supported",
+                "initializer: '{}' data in int32/int64 field, only f32 is supported",
                 tensor.name
             ));
         }
 
+        // create tensor from raw data, if available
         let tensor = if !tensor.raw_data.is_empty() {
-            let expected = numel * 4;
-            if tensor.raw_data.len() as u64 != expected {
+            let expected_size = numel * 4;
+            if tensor.raw_data.len() as u64 != expected_size {
                 return Err(anyhow!(
-                    "initializer '{}': raw bytes = {}, shape needs {expected}",
+                    "initializer: '{}' found {} bytes, tensor shape needs {expected_size}",
                     tensor.name,
                     tensor.raw_data.len()
                 ));
             }
-            Tensor::create(
-                tensor.name.clone(),
-                tensor.dims.clone(),
-                raw_as_f32(&tensor.raw_data),
-            )
+            Tensor::create(tensor.name.clone(), tensor.dims.clone(), unsafe {
+                raw_as_f32(&tensor.raw_data)
+            })
         } else {
             if tensor.float_data.len() as u64 != numel {
                 return Err(anyhow!(
-                    "initializer '{}': {} f32 values, shape needs {numel}",
+                    "initializer: '{}' found {} f32 values, shape needs {numel}",
                     tensor.name,
                     tensor.float_data.len()
                 ));
@@ -193,14 +202,15 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
         initializers.push(tensor);
     }
 
+    // validate & collect graph inputs
     let mut inputs: Vec<Value> = Vec::with_capacity(graph.input.len());
     for (i, vi) in graph.input.iter().enumerate() {
         if vi.name.is_empty() {
             return Err(anyhow!("graph input #{i} has no name"));
         }
+        // weight also listed in graph.input
+        // the initializer was already validated
         if init_names.contains(vi.name.as_str()) {
-            // weight also listed in graph.input
-            // the initializer was already validated.
             defined.insert(vi.name.clone());
             continue;
         }
@@ -208,6 +218,8 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
         defined.insert(value.name.clone());
         inputs.push(value);
     }
+
+    // validate & collect graph outputs
     let mut outputs: Vec<Value> = Vec::with_capacity(graph.output.len());
     for vo in &graph.output {
         if vo.name.is_empty() {
@@ -217,10 +229,11 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
         outputs.push(value);
     }
 
+    // validate & collect graph nodes
     let mut nodes: Vec<Node> = Vec::with_capacity(graph.node.len());
     for (i, np) in graph.node.iter().enumerate() {
         let label = if np.name.is_empty() {
-            format!("node#{i}")
+            return Err(anyhow!("node #{i} has no name"));
         } else {
             np.name.clone()
         };
@@ -258,7 +271,8 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
             ));
         }
 
-        let mut attrs: Vec<(&'static str, AttrValue)> = Vec::new();
+        // validate & collect node attributes
+        let mut attrs: Vec<(&'static str, AttrValue)> = vec![];
         for a in &np.attribute {
             let Some(&(name, kind)) = spec.attrs.iter().find(|(n, _)| *n == a.name.as_str()) else {
                 return Err(anyhow!(
@@ -307,6 +321,7 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
         });
     }
 
+    // check for cycles or undefined inputs
     for (i, np) in graph.node.iter().enumerate() {
         for inp in &np.input {
             if inp.is_empty() {
@@ -345,20 +360,20 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
     })
 }
 
-fn read_declared_value(vi: &ValueInfoProto, what: &str) -> Result<Value> {
+fn read_declared_value(vi: &ValueInfoProto, field: &str) -> Result<Value> {
     let name = &vi.name;
     let Some(tt) = vi.type_.as_ref().and_then(|t| t.tensor_type.as_ref()) else {
-        return Err(anyhow!("{what} '{name}': no tensor type declared"));
+        return Err(anyhow!("{field} '{name}': no tensor type declared"));
     };
     if tt.elem_type != 1 {
         return Err(anyhow!(
-            "{what} '{name}': {}, only f32 is supported",
+            "{field} '{name}': {}, only f32 is supported",
             dtype_name(tt.elem_type)
         ));
     }
     let Some(shape) = &tt.shape else {
         return Err(anyhow!(
-            "{what} '{name}': no shape declared, concrete shapes required"
+            "{field} '{name}': no shape declared, concrete shapes required"
         ));
     };
     let mut dims = Vec::with_capacity(shape.dim.len());
@@ -366,11 +381,13 @@ fn read_declared_value(vi: &ValueInfoProto, what: &str) -> Result<Value> {
         match &d.dim_value {
             Some(v) if *v >= 0 => dims.push(*v),
             Some(v) => {
-                return Err(anyhow!("{what} '{name}': dim[{di}] = {v} < 0"));
+                return Err(anyhow!(
+                    "{field} '{name}': encountered negative dim value: {v} at index dim[{di}]"
+                ));
             }
             None => {
                 return Err(anyhow!(
-                    "{what} '{name}': dim[{di}] is symbolic, concrete shapes required"
+                    "{field} '{name}': encountered symbolic dim at index dim[{di}], concrete shapes required"
                 ));
             }
         }
@@ -381,6 +398,7 @@ fn read_declared_value(vi: &ValueInfoProto, what: &str) -> Result<Value> {
     })
 }
 
+#[inline]
 fn dtype_name(code: i32) -> &'static str {
     match code {
         2 => "uint8",
@@ -403,14 +421,10 @@ fn dtype_name(code: i32) -> &'static str {
 }
 
 #[inline]
-fn raw_as_f32(bytes: &[u8]) -> Vec<f32> {
-    assert!(
-        bytes.len() % 4 == 0,
-        "raw_data is {} bytes — not a multiple of 4",
-        bytes.len()
-    );
-    bytes
-        .chunks_exact(4)
+unsafe fn raw_as_f32(bytes: &[u8]) -> Vec<f32> {
+    let (full_chunks, _reminder_chunks) = bytes.as_chunks::<4>();
+    full_chunks
+        .iter()
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect()
 }

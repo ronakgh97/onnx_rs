@@ -30,7 +30,7 @@ pub struct OperatorSpec {
 #[derive(Clone, Copy, PartialEq, Eq, Debug, PartialOrd, Ord)]
 pub enum Operator {
     Gemm, MatMul, Conv, MaxPool,
-    AveragePool, Relu, Sigmoid, Clip,
+    AveragePool, Relu, PRelu, Sigmoid, Clip,
     DepthToSpace, Flatten, Transpose, Softmax,
     Add, Sub, Mul, Div,
 }
@@ -44,6 +44,7 @@ impl Operator {
             "MaxPool" => Operator::MaxPool,
             "AveragePool" => Operator::AveragePool,
             "Relu" => Operator::Relu,
+            "PRelu" => Operator::PRelu,
             "Sigmoid" => Operator::Sigmoid,
             "Clip" => Operator::Clip,
             "DepthToSpace" => Operator::DepthToSpace,
@@ -68,6 +69,7 @@ impl Operator {
             Operator::MaxPool => "MaxPool",
             Operator::AveragePool => "AveragePool",
             Operator::Relu => "Relu",
+            Operator::PRelu => "PRelu",
             Operator::Sigmoid => "Sigmoid",
             Operator::Clip => "Clip",
             Operator::DepthToSpace => "DepthToSpace",
@@ -149,6 +151,13 @@ impl Operator {
             Operator::Relu => OperatorSpec {
                 min_opset: 13,
                 arity_in: (1, 1),
+                arity_out: (1, 1),
+                attrs: &[],
+            },
+            // 16 = newest PRelu edition; takes X + slope, no attrs
+            Operator::PRelu => OperatorSpec {
+                min_opset: 16,
+                arity_in: (2, 2),
                 arity_out: (1, 1),
                 attrs: &[],
             },
