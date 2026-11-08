@@ -33,7 +33,11 @@ impl Tensor {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
-    pub fn dims(&self) -> &[i64] {
-        &self.dims
+    pub fn strides(&self) -> Vec<i64> {
+        let mut strides = vec![1i64; self.dims.len()];
+        for i in (0..self.dims.len() - 1).rev() {
+            strides[i] = strides[i + 1] * self.dims[i + 1];
+        }
+        strides
     }
 }

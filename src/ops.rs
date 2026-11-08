@@ -44,56 +44,37 @@ pub enum Operator {
 }
 
 impl Operator {
+    #[inline(always)]
+    #[rustfmt::skip]
     pub fn lookup(name: &str) -> Option<Operator> {
         let op = match name {
-            "Gemm" => Operator::Gemm,
-            "MatMul" => Operator::MatMul,
-            "Conv" => Operator::Conv,
-            "MaxPool" => Operator::MaxPool,
-            "AveragePool" => Operator::AveragePool,
-            "Relu" => Operator::Relu,
-            "PRelu" => Operator::PRelu,
-            "Sigmoid" => Operator::Sigmoid,
-            "Clip" => Operator::Clip,
-            "DepthToSpace" => Operator::DepthToSpace,
-            "Flatten" => Operator::Flatten,
-            "Transpose" => Operator::Transpose,
-            "Add" => Operator::Add,
-            "Sub" => Operator::Sub,
-            "Mul" => Operator::Mul,
-            "Div" => Operator::Div,
-            "Softmax" => Operator::Softmax,
+            "Gemm" => Operator::Gemm, "MatMul" => Operator::MatMul, "Conv" => Operator::Conv,
+            "MaxPool" => Operator::MaxPool, "AveragePool" => Operator::AveragePool, "Relu" => Operator::Relu,
+            "PRelu" => Operator::PRelu, "Sigmoid" => Operator::Sigmoid, "Clip" => Operator::Clip,
+            "DepthToSpace" => Operator::DepthToSpace, "Flatten" => Operator::Flatten, "Transpose" => Operator::Transpose,
+            "Add" => Operator::Add, "Sub" => Operator::Sub, "Mul" => Operator::Mul,
+            "Div" => Operator::Div, "Softmax" => Operator::Softmax,
             _ => return None,
         };
         Some(op)
     }
 
-    /// Stable name for reports and the pending-kernels list.
+    #[inline(always)]
+    #[rustfmt::skip]
     pub fn static_name(self) -> &'static str {
         match self {
-            Operator::Gemm => "Gemm",
-            Operator::MatMul => "MatMul",
-            Operator::Conv => "Conv",
-            Operator::MaxPool => "MaxPool",
-            Operator::AveragePool => "AveragePool",
-            Operator::Relu => "Relu",
-            Operator::PRelu => "PRelu",
-            Operator::Sigmoid => "Sigmoid",
-            Operator::Clip => "Clip",
-            Operator::DepthToSpace => "DepthToSpace",
-            Operator::Flatten => "Flatten",
-            Operator::Transpose => "Transpose",
-            Operator::Add => "Add",
-            Operator::Sub => "Sub",
-            Operator::Mul => "Mul",
-            Operator::Div => "Div",
-            Operator::Softmax => "Softmax",
+            Operator::Gemm => "Gemm", Operator::MatMul => "MatMul", Operator::Conv => "Conv",
+            Operator::MaxPool => "MaxPool", Operator::AveragePool => "AveragePool", Operator::Relu => "Relu",
+            Operator::PRelu => "PRelu", Operator::Sigmoid => "Sigmoid", Operator::Clip => "Clip",
+            Operator::DepthToSpace => "DepthToSpace", Operator::Flatten => "Flatten", Operator::Transpose => "Transpose",
+            Operator::Add => "Add", Operator::Sub => "Sub", Operator::Mul => "Mul",
+            Operator::Div => "Div", Operator::Softmax => "Softmax",
         }
     }
 
+    #[inline(always)]
     pub fn spec(self) -> OperatorSpec {
         match self {
-            // 13 = C-broadcast rule finalized; alpha/beta/transA/transB
             Operator::Gemm => OperatorSpec {
                 min_opset: 13,
                 arity_in: (2, 3),
@@ -105,14 +86,12 @@ impl Operator {
                     ("transB", AttributesDataKind::I64),
                 ],
             },
-            // 13 = "since version 13" edition of the definition. No attrs
             Operator::MatMul => OperatorSpec {
                 min_opset: 13,
                 arity_in: (2, 2),
                 arity_out: (1, 1),
                 attrs: &[],
             },
-            // 11 = pads/strides/dilations semantics settled, group attr present
             Operator::Conv => OperatorSpec {
                 min_opset: 11,
                 arity_in: (2, 3),
@@ -126,8 +105,6 @@ impl Operator {
                     ("strides", AttributesDataKind::Ints),
                 ],
             },
-            // 12 = kernel_shape/strides/pads back as attributes; indices out is
-            // the optional 2nd output
             Operator::MaxPool => OperatorSpec {
                 min_opset: 12,
                 arity_in: (1, 1),
@@ -155,14 +132,12 @@ impl Operator {
                     ("strides", AttributesDataKind::Ints),
                 ],
             },
-            // 13 = one stable activation edition; no attrs
             Operator::Relu => OperatorSpec {
                 min_opset: 13,
                 arity_in: (1, 1),
                 arity_out: (1, 1),
                 attrs: &[],
             },
-            // 16 = newest PRelu edition; takes X + slope, no attrs
             Operator::PRelu => OperatorSpec {
                 min_opset: 16,
                 arity_in: (2, 2),
@@ -175,14 +150,12 @@ impl Operator {
                 arity_out: (1, 1),
                 attrs: &[],
             },
-            // 11 = min/max are INPUTS now (old versions carried attributes)
             Operator::Clip => OperatorSpec {
                 min_opset: 11,
                 arity_in: (1, 3),
                 arity_out: (1, 1),
                 attrs: &[],
             },
-            // 11 = mode DCR|CRD settled
             Operator::DepthToSpace => OperatorSpec {
                 min_opset: 11,
                 arity_in: (1, 1),
@@ -198,14 +171,12 @@ impl Operator {
                 arity_out: (1, 1),
                 attrs: &[("axis", AttributesDataKind::I64)],
             },
-            // 14 = allowzero attribute added
             Operator::Transpose => OperatorSpec {
                 min_opset: 13,
                 arity_in: (1, 1),
                 arity_out: (1, 1),
                 attrs: &[("perm", AttributesDataKind::Ints)],
             },
-            // 14 = current broadcast/allowzero edition
             Operator::Add => OperatorSpec {
                 min_opset: 14,
                 arity_in: (2, 2),
@@ -230,7 +201,6 @@ impl Operator {
                 arity_out: (1, 1),
                 attrs: &[("allowzero", AttributesDataKind::I64)],
             },
-            // 13 = negative-axis semantics settled
             Operator::Softmax => OperatorSpec {
                 min_opset: 13,
                 arity_in: (1, 1),
