@@ -1,3 +1,4 @@
+mod kernels;
 mod ops;
 mod proto;
 mod tensor;
@@ -17,7 +18,7 @@ pub struct Node {
     pub name: String,
     pub inputs: Vec<String>,
     pub outputs: Vec<String>,
-    pub attrs: Vec<(&'static str, AttributesDataValue)>,
+    pub attrs: Vec<(String, AttributesDataValue)>,
 }
 
 #[derive(Clone, Debug)]
@@ -31,11 +32,99 @@ pub struct Model {
 }
 
 impl Model {
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+    pub fn from_bytes(bytes: &Arc<[u8]>) -> Result<Self> {
         decode_model(bytes)
     }
     pub fn from_file(path: impl AsRef<Path>) -> Result<Self> {
         decode_model(&std::fs::read(path)?)
+    }
+    pub fn run_single(&self, data: &Tensor) -> Result<Tensor> {
+        if self.inputs.len() != 1 || self.outputs.len() != 1 {
+            return Err(anyhow!(
+                "run_single needs a 1-input/1-output graph, got {}/{}",
+                self.inputs.len(),
+                self.outputs.len()
+            ));
+        }
+        let mut feed: HashMap<String, Tensor> = HashMap::default();
+        feed.insert(self.inputs[0].name.to_string(), data.clone());
+        let mut out = self.run(&feed)?;
+        Ok(out.remove(0))
+    }
+    pub fn run(&self, feed: &HashMap<String, Tensor>) -> Result<Vec<Tensor>> {
+        // validate feed, every declared input is provided, and no extra inputs are given
+        for spec in &self.inputs {
+            let Some(t) = feed.get(spec.name.as_ref()) else {
+                return Err(anyhow!("feed: missing input '{}'", spec.name));
+            };
+            if t.dims != spec.dims {
+                return Err(anyhow!(
+                    "input '{}': got dims {:?}, graph declares {:?}",
+                    spec.name,
+                    t.dims,
+                    spec.dims
+                ));
+            }
+        }
+        for name in feed.keys() {
+            if !self.inputs.iter().any(|s| s.name.as_ref() == name) {
+                return Err(anyhow!("feed: unexpected input '{name}'"));
+            }
+        }
+
+        // build scope, initializers + feed
+        let mut scope: HashMap<&str, Tensor> = HashMap::default();
+        for t in &self.initializers {
+            scope.insert(t.name.as_ref(), t.clone());
+        }
+        for (name, t) in feed {
+            scope.insert(name.as_str(), t.clone());
+        }
+
+        // walk the graph in topological order,
+        // compute each node's output(s) and bind them to scope
+        for node in &self.nodes {
+            let mut slots: Vec<Option<&Tensor>> = Vec::with_capacity(node.inputs.len());
+            for name in &node.inputs {
+                if name.is_empty() {
+                    slots.push(None);
+                    continue;
+                }
+                let t = scope
+                    .get(name.as_str())
+                    .ok_or_else(|| anyhow!("{}: input '{}' is not in scope", node.name, name))?;
+                slots.push(Some(t));
+            }
+            let Some(oname) = node.outputs.first() else {
+                return Err(anyhow!("{}: node has zero outputs", node.name));
+            };
+            let out = node.op.compute(oname.as_str(), &slots, &node.attrs)?;
+            scope.insert(oname.as_str(), out);
+        }
+
+        // graph is done, collect outputs from scope
+        let mut produced = Vec::with_capacity(self.outputs.len());
+        for spec in &self.outputs {
+            let Some(t) = scope.get(spec.name.as_ref()) else {
+                return Err(anyhow!("output '{}' was never produced", spec.name));
+            };
+            if t.dims != spec.dims {
+                return Err(anyhow!(
+                    "output '{}': got dims {:?}, graph declares {:?}",
+                    spec.name,
+                    t.dims,
+                    spec.dims
+                ));
+            }
+            produced.push(t.clone());
+        }
+        Ok(produced)
+    }
+    pub fn operators(&self) -> Vec<Operator> {
+        let mut ops: Vec<Operator> = self.nodes.iter().map(|n| n.op).collect();
+        ops.sort_unstable();
+        ops.dedup();
+        ops
     }
 }
 
@@ -121,6 +210,18 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
             })?;
         }
 
+        // allow empty tensors, for god sake,
+        // if this creating bad cases to handle, i will lose my shit
+        if numel == 0 {
+            defined.insert(tensor.name.clone());
+            initializers.push(Tensor::create(
+                tensor.name.clone(),
+                tensor.dims.clone(),
+                vec![],
+            ));
+            continue;
+        }
+
         // collect storage field sources
         let sources: u64 = [
             !tensor.raw_data.is_empty(),
@@ -159,7 +260,9 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
 
         // create tensor from raw data, if available
         let tensor = if !tensor.raw_data.is_empty() {
-            let expected_size = numel * 4;
+            let expected_size = numel
+                .checked_mul(4)
+                .ok_or_else(|| anyhow!("initializer: '{}' byte size overflows", tensor.name))?;
             if tensor.raw_data.len() as u64 != expected_size {
                 return Err(anyhow!(
                     "initializer: '{}' found {} bytes, tensor shape needs {expected_size}",
@@ -198,11 +301,15 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
         // weight also listed in graph.input
         // the initializer was already validated
         if init_names.contains(vi.name.as_str()) {
-            defined.insert(vi.name.clone());
+            if !defined.insert(vi.name.clone()) {
+                return Err(anyhow!("graph input '{}': duplicate name", vi.name));
+            }
             continue;
         }
         let value = read_declared_value(vi, "graph input")?;
-        defined.insert(value.name.to_string());
+        if !defined.insert(value.name.to_string()) {
+            return Err(anyhow!("graph input '{}': duplicate name", vi.name));
+        }
         inputs.push(value);
     }
 
@@ -220,7 +327,9 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
     let mut nodes: Vec<Node> = Vec::with_capacity(graph.node.len());
     for (i, np) in graph.node.iter().enumerate() {
         let label = if np.name.is_empty() {
-            return Err(anyhow!("node #{i} has no name"));
+            // dont error on empty name,
+            // hope it's just a placeholder, not some weird case i need to handle
+            format!("node#{i}")
         } else {
             np.name.clone()
         };
@@ -259,7 +368,7 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
         }
 
         // validate & collect node attributes
-        let mut attrs: Vec<(&'static str, AttributesDataValue)> = vec![];
+        let mut attrs: Vec<(String, AttributesDataValue)> = vec![];
         for a in &np.attribute {
             let Some(&(name, kind)) = spec.attrs.iter().find(|(n, _)| *n == a.name.as_str()) else {
                 return Err(anyhow!(
@@ -268,6 +377,21 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
                     op.static_name()
                 ));
             };
+
+            // validate attribute type
+            let got = a
+                .type_
+                .and_then(AttributesDataKind::proto_name_from_proto_code);
+            let expected_type = kind.proto_code();
+            if a.type_ != Some(expected_type) {
+                return Err(anyhow!(
+                    "{label}: attribute '{name}' expects type {}, got {:?}",
+                    kind.proto_name(),
+                    got
+                ));
+            }
+
+            // check attr value is present and matches expected kind
             let attr = match (kind, &a.f, &a.i, &a.s, &a.ints) {
                 (AttributesDataKind::F32, Some(f), _, _, _) => AttributesDataValue::F32(*f),
                 (AttributesDataKind::I64, _, Some(i), _, _) => AttributesDataValue::I64(*i),
@@ -286,17 +410,21 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
                     ));
                 }
             };
-            attrs.push((name, attr));
+            attrs.push((name.to_string(), attr));
         }
 
         for oname in &np.output {
             if oname.is_empty() {
-                return Err(anyhow!("{label}: empty output name"));
+                continue;
             }
             if producers.insert(oname.clone(), i).is_some() {
                 return Err(anyhow!("tensor '{oname}': produced by more than one node"));
             }
-            defined.insert(oname.to_string());
+            if !defined.insert(oname.to_string()) {
+                return Err(anyhow!(
+                    "{label}: output '{oname}' reuses an initializer or graph input name"
+                ));
+            }
         }
 
         nodes.push(Node {
@@ -347,6 +475,7 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
     })
 }
 
+#[inline]
 fn read_declared_value(vi: &ValueInfoProto, field: &str) -> Result<TensorSpec> {
     let name = vi.name.as_str();
     let Some(tt) = vi.type_.as_ref().and_then(|t| t.tensor_type.as_ref()) else {
@@ -363,6 +492,9 @@ fn read_declared_value(vi: &ValueInfoProto, field: &str) -> Result<TensorSpec> {
             "{field} '{name}': no shape declared, concrete shapes required"
         ));
     };
+    if shape.dim.is_empty() {
+        return Err(anyhow!("{field} '{name}': shape declared, but rank is 0"));
+    }
     let mut dims = Vec::with_capacity(shape.dim.len());
     for (di, d) in shape.dim.iter().enumerate() {
         match &d.dim_value {
@@ -409,6 +541,8 @@ fn dtype_name(code: i32) -> &'static str {
 
 #[inline]
 unsafe fn raw_as_f32(bytes: &[u8]) -> Vec<f32> {
+    // safety: the caller must ensure that the
+    // bytes slice is a valid representation of f32 values
     let (full_chunks, _reminder_chunks) = bytes.as_chunks::<4>();
     full_chunks
         .iter()

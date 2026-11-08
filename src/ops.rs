@@ -16,13 +16,35 @@ pub enum AttributesDataValue {
 }
 
 impl AttributesDataKind {
+    fn metadata(&self) -> (&'static str, i32, &'static str) {
+        match self {
+            AttributesDataKind::F32 => ("f32", 1, "FLOAT"),
+            AttributesDataKind::I64 => ("i64", 2, "INT"),
+            AttributesDataKind::Str => ("string", 3, "STRING"),
+            AttributesDataKind::Ints => ("i64 list", 7, "INTS"),
+        }
+    }
+
     #[inline(always)]
     pub fn name(self) -> &'static str {
-        match self {
-            AttributesDataKind::F32 => "f32",
-            AttributesDataKind::I64 => "i64",
-            AttributesDataKind::Str => "string",
-            AttributesDataKind::Ints => "i64 list",
+        self.metadata().0
+    }
+    #[inline(always)]
+    pub fn proto_code(&self) -> i32 {
+        self.metadata().1
+    }
+    #[inline(always)]
+    pub fn proto_name(&self) -> &'static str {
+        self.metadata().2
+    }
+    #[inline(always)]
+    pub fn proto_name_from_proto_code(code: i32) -> Option<&'static str> {
+        match code {
+            1 => Some("FLOAT"),
+            2 => Some("INT"),
+            3 => Some("STRING"),
+            7 => Some("INTS"),
+            _ => None,
         }
     }
 }
@@ -51,9 +73,9 @@ impl Operator {
     pub fn lookup(name: &str) -> Option<Operator> {
         let op = match name {
             "Clip" => Operator::Clip, "Relu" => Operator::Relu, "PRelu" => Operator::PRelu, "DepthToSpace" => Operator::DepthToSpace,
-            "Conv" => Operator::Conv, "Gemm" => Operator::Gemm, "MatMul" => Operator::MatMul, "MaxPool" => Operator::MaxPool, 
+            "Conv" => Operator::Conv, "Gemm" => Operator::Gemm, "MatMul" => Operator::MatMul, "MaxPool" => Operator::MaxPool,
             "AveragePool" => Operator::AveragePool, "Sigmoid" => Operator::Sigmoid, "Flatten" => Operator::Flatten, "Transpose" => Operator::Transpose,
-            "Softmax" => Operator::Softmax, "Add" => Operator::Add, "Sub" => Operator::Sub, "Mul" => Operator::Mul, "Div" => Operator::Div, 
+            "Softmax" => Operator::Softmax, "Add" => Operator::Add, "Sub" => Operator::Sub, "Mul" => Operator::Mul, "Div" => Operator::Div,
             _ => return None,
         };
         Some(op)
