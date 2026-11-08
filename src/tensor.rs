@@ -15,7 +15,7 @@ pub struct TensorSpec {
 }
 
 impl Tensor {
-    pub fn create(name: String, dims: Vec<i64>, data: Vec<f32>) -> Self {
+    pub fn create(name: &str, dims: Vec<i64>, data: Vec<f32>) -> Self {
         assert_eq!(
             dims.iter().product::<i64>() as usize,
             data.len(),
@@ -38,8 +38,10 @@ impl Tensor {
     #[inline]
     pub fn strides(&self) -> Vec<i64> {
         let mut strides = vec![1i64; self.dims.len()];
-        for i in (0..self.dims.len() - 1).rev() {
-            strides[i] = strides[i + 1] * self.dims[i + 1];
+        if !self.dims.is_empty() {
+            for i in (0..self.dims.len() - 1).rev() {
+                strides[i] = strides[i + 1] * self.dims[i + 1];
+            }
         }
         strides
     }

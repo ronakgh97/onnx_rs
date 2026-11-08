@@ -210,15 +210,11 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
             })?;
         }
 
-        // allow empty tensors, for god sake,
-        // if this creating bad cases to handle, i will lose my shit
+        // allow empty tensors, for god’s sake,
+        // if this creating bad cases to handle, I will lose my shit
         if numel == 0 {
             defined.insert(tensor.name.clone());
-            initializers.push(Tensor::create(
-                tensor.name.clone(),
-                tensor.dims.clone(),
-                vec![],
-            ));
+            initializers.push(Tensor::create(&tensor.name, tensor.dims.clone(), vec![]));
             continue;
         }
 
@@ -270,9 +266,11 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
                     tensor.raw_data.len()
                 ));
             }
-            Tensor::create(tensor.name.clone(), tensor.dims.clone(), unsafe {
-                raw_as_f32(&tensor.raw_data)
-            })
+            Tensor::create(
+                &tensor.name,
+                tensor.dims.clone(),
+                raw_as_f32(&tensor.raw_data),
+            )
         } else {
             if tensor.float_data.len() as u64 != numel {
                 return Err(anyhow!(
@@ -281,11 +279,7 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
                     tensor.float_data.len()
                 ));
             }
-            Tensor::create(
-                tensor.name.clone(),
-                tensor.dims.clone(),
-                tensor.float_data.clone(),
-            )
+            Tensor::create(&tensor.name, tensor.dims.clone(), tensor.float_data.clone())
         };
 
         defined.insert(tensor.name.to_string());
@@ -540,10 +534,14 @@ fn dtype_name(code: i32) -> &'static str {
 }
 
 #[inline]
-unsafe fn raw_as_f32(bytes: &[u8]) -> Vec<f32> {
-    // safety: the caller must ensure that the
-    // bytes slice is a valid representation of f32 values
-    let (full_chunks, _reminder_chunks) = bytes.as_chunks::<4>();
+fn raw_as_f32(bytes: &[u8]) -> Vec<f32> {
+    let (full_chunks, reminder_chunks) = bytes.as_chunks::<4>();
+    assert!(
+        reminder_chunks.is_empty(),
+        "invalid bytes length: {}",
+        bytes.len()
+    );
+
     full_chunks
         .iter()
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))

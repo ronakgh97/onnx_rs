@@ -4,9 +4,8 @@ use crate::tensor::Tensor;
 use anyhow::{Result, anyhow};
 use blas_rs::*;
 use std::arch::x86_64::{
-    _CMP_LT_OQ, _mm256_blendv_ps, _mm256_cmp_ps, _mm256_load_ps, _mm256_loadu_ps, _mm256_max_ps,
-    _mm256_min_ps, _mm256_mul_ps, _mm256_set1_ps, _mm256_setzero_ps, _mm256_store_ps,
-    _mm256_storeu_ps,
+    _CMP_LT_OQ, _mm256_blendv_ps, _mm256_cmp_ps, _mm256_loadu_ps, _mm256_max_ps, _mm256_min_ps,
+    _mm256_mul_ps, _mm256_set1_ps, _mm256_setzero_ps, _mm256_storeu_ps,
 };
 
 impl Operator {
@@ -164,11 +163,7 @@ fn clip(out_name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
     if let (Some(lo), Some(hi)) = (min, max)
         && lo > hi
     {
-        return Ok(Tensor::create(
-            out_name.to_string(),
-            x.dims.to_vec(),
-            vec![hi; x.len()],
-        ));
+        return Ok(Tensor::create(out_name, x.dims.to_vec(), vec![hi; x.len()]));
     }
 
     // basically do this cmp::min(max, cmp::max(min, x))
@@ -184,10 +179,10 @@ fn clip(out_name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
 
         for (in_chunk, out_chunk) in input_chunk.iter().zip(output_chunk.iter_mut()) {
             // TODO; handle NAN/Inf behavior according to ONNX spec
-            let v = _mm256_load_ps(in_chunk.as_ptr());
+            let v = _mm256_loadu_ps(in_chunk.as_ptr());
             let v = _mm256_min_ps(v, vmax);
             let v = _mm256_max_ps(v, vmin);
-            _mm256_store_ps(out_chunk.as_mut_ptr(), v);
+            _mm256_storeu_ps(out_chunk.as_mut_ptr(), v);
         }
 
         for (src, dst) in input_remainder.iter().zip(output_remainder.iter_mut()) {
@@ -195,11 +190,7 @@ fn clip(out_name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
         }
     }
 
-    Ok(Tensor::create(
-        out_name.to_string(),
-        x.dims.to_vec(),
-        out_data,
-    ))
+    Ok(Tensor::create(out_name, x.dims.to_vec(), out_data))
 }
 
 fn relu(out_name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
@@ -207,7 +198,7 @@ fn relu(out_name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
 
     let mut data = vec![0f32; x.data.len()];
     if x.data.is_empty() {
-        return Ok(Tensor::create(out_name.to_string(), x.dims.to_vec(), data));
+        return Ok(Tensor::create(out_name, x.dims.to_vec(), data));
     }
 
     if data.len() >= 8 {
@@ -236,7 +227,7 @@ fn relu(out_name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
         }
     }
 
-    Ok(Tensor::create(out_name.to_string(), x.dims.to_vec(), data))
+    Ok(Tensor::create(out_name, x.dims.to_vec(), data))
 }
 
 fn prelu(out_name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
@@ -270,7 +261,7 @@ fn prelu(out_name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
     let rank = x_dims.len();
     let mut data = vec![0f32; x.data.len()];
     if x.data.is_empty() {
-        return Ok(Tensor::create(out_name.to_string(), x_dims.to_vec(), data));
+        return Ok(Tensor::create(out_name, x_dims.to_vec(), data));
     }
 
     // calculate the number of elements in the last contiguous block
@@ -284,11 +275,7 @@ fn prelu(out_name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
         }
     }
 
-    let s_strides: Vec<usize> = if s_dims.is_empty() {
-        vec![]
-    } else {
-        slope.strides().iter().map(|&s| s as usize).collect()
-    };
+    let s_strides: Vec<usize> = slope.strides().iter().map(|&s| s as usize).collect();
 
     if block >= 8 {
         // simd path
@@ -358,7 +345,7 @@ fn prelu(out_name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
         }
     }
 
-    Ok(Tensor::create(out_name.to_string(), x_dims.to_vec(), data))
+    Ok(Tensor::create(out_name, x_dims.to_vec(), data))
 }
 
 fn depth_to_space(
@@ -440,7 +427,7 @@ fn depth_to_space(
     }
 
     Ok(Tensor::create(
-        out_name.to_string(),
+        out_name,
         vec![ni as i64, co as i64, oh as i64, ow as i64],
         data,
     ))
@@ -666,7 +653,7 @@ fn conv(
     }
 
     Ok(Tensor::create(
-        out_name.to_string(),
+        out_name,
         vec![n as i64, m as i64, oh as i64, ow as i64],
         out,
     ))
@@ -679,74 +666,67 @@ fn add(out_name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
     let x_dims = &x.dims;
     let y_dims = &y.dims;
 
+    // compute strides
+    let x_strides: Vec<usize> = x.strides().iter().map(|&s| s as usize).collect();
+    let y_strides: Vec<usize> = y.strides().iter().map(|&s| s as usize).collect();
+
+    // compute output dimensions with broadcasting
     let rank = x_dims.len().max(y_dims.len());
+    let x_pad = rank - x_dims.len();
+    let y_pad = rank - y_dims.len();
+
     let mut out_dims = Vec::with_capacity(rank);
+    let mut bx_strides = vec![0usize; rank];
+    let mut by_strides = vec![0usize; rank];
 
     for k in 0..rank {
-        let xi = x_dims.len() as isize - rank as isize + k as isize;
-        let yi = y_dims.len() as isize - rank as isize + k as isize;
-        let xd = if xi < 0 { 1 } else { x_dims[xi as usize] };
-        let yd = if yi < 0 { 1 } else { y_dims[yi as usize] };
-        let od = xd.max(yd);
-        if xd != 1 && xd != od {
+        let xd = if k < x_pad { 1 } else { x_dims[k - x_pad] };
+        let yd = if k < y_pad { 1 } else { y_dims[k - y_pad] };
+
+        let od = if xd == yd {
+            xd
+        } else if xd == 1 {
+            yd
+        } else if yd == 1 {
+            xd
+        } else {
             return Err(anyhow!(
                 "Add: cannot broadcast X dims {:?} with Y dims {:?}",
                 x_dims,
                 y_dims
             ));
+        };
+
+        if k >= x_pad && xd != 1 {
+            bx_strides[k] = x_strides[k - x_pad] as usize;
         }
-        if yd != 1 && yd != od {
-            return Err(anyhow!(
-                "Add: cannot broadcast X dims {:?} with Y dims {:?}",
-                x_dims,
-                y_dims
-            ));
+        if k >= y_pad && yd != 1 {
+            by_strides[k] = y_strides[k - y_pad] as usize;
         }
+
         out_dims.push(od);
     }
-
-    let x_strides: Vec<usize> = if x_dims.is_empty() {
-        vec![]
-    } else {
-        x.strides().iter().map(|&s| s as usize).collect()
-    };
-    let y_strides: Vec<usize> = if y_dims.is_empty() {
-        vec![]
-    } else {
-        y.strides().iter().map(|&s| s as usize).collect()
-    };
 
     let total: usize = out_dims.iter().map(|&d| d as usize).product();
     let mut data = vec![0f32; total];
 
-    for i in 0..total {
-        let mut rem = i;
-        let mut coords = vec![0usize; rank];
+    let mut coords = vec![0usize; rank];
+    let (mut xi, mut yi) = (0usize, 0usize);
+    for dst in &mut data {
+        *dst = x.data[xi] + y.data[yi];
+
         for k in (0..rank).rev() {
-            let dim = out_dims[k] as usize;
-            coords[k] = rem % dim;
-            rem /= dim;
-        }
-        let mut sidx = 0usize;
-        let mut tidx = 0usize;
-        for k in 0..rank {
-            let xi = x_dims.len() as isize - rank as isize + k as isize;
-            if xi >= 0 {
-                let j = xi as usize;
-                if x_dims[j] != 1 {
-                    sidx += coords[k] * x_strides[j];
-                }
+            coords[k] += 1;
+            if coords[k] < out_dims[k] as usize {
+                xi += bx_strides[k];
+                yi += by_strides[k];
+                break;
             }
-            let yi = y_dims.len() as isize - rank as isize + k as isize;
-            if yi >= 0 {
-                let j = yi as usize;
-                if y_dims[j] != 1 {
-                    tidx += coords[k] * y_strides[j];
-                }
-            }
+            coords[k] = 0;
+            xi -= (out_dims[k] as usize - 1) * bx_strides[k];
+            yi -= (out_dims[k] as usize - 1) * by_strides[k];
         }
-        data[i] = x.data[sidx] + y.data[tidx];
     }
 
-    Ok(Tensor::create(out_name.to_string(), out_dims, data))
+    Ok(Tensor::create(out_name, out_dims, data))
 }
