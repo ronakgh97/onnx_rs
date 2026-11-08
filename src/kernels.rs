@@ -23,7 +23,7 @@ impl Operator {
             Operator::PRelu => prelu(out_name, inputs),
             Operator::DepthToSpace => depth_to_space(out_name, inputs, attrs),
             Operator::Conv => conv(out_name, inputs, attrs),
-            Operator::Gemm => todo!(),
+            Operator::Add => add(out_name, inputs),
             _ => Err(anyhow!(
                 "operator '{}' has no kernel implemented yet",
                 self.static_name()
@@ -41,6 +41,7 @@ fn slot<'s>(inputs: &'s [Option<&'s Tensor>], index: usize, op_name: &str) -> Re
 }
 
 #[inline(always)]
+#[allow(unused)]
 fn attr_f32<'s>(attrs: &'s [(String, AttributesDataValue)], name: &str) -> Result<Option<&'s f32>> {
     for (k, v) in attrs {
         if k == name {
@@ -160,14 +161,14 @@ fn clip(out_name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
     };
 
     // if min is greater than max, then fill input with max
-    if let (Some(lo), Some(hi)) = (min, max) {
-        if lo > hi {
-            return Ok(Tensor::create(
-                out_name.to_string(),
-                x.dims.to_vec(),
-                vec![hi; x.len()],
-            ));
-        }
+    if let (Some(lo), Some(hi)) = (min, max)
+        && lo > hi
+    {
+        return Ok(Tensor::create(
+            out_name.to_string(),
+            x.dims.to_vec(),
+            vec![hi; x.len()],
+        ));
     }
 
     // basically do this cmp::min(max, cmp::max(min, x))
@@ -247,8 +248,8 @@ fn prelu(out_name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
     if s_dims.len() > x_dims.len() {
         return Err(anyhow!(
             "PRelu: slope dims {:?} is less than X dims {:?} and cannot be broadcasted",
-            &slope.dims,
-            &x.dims
+            slope.dims,
+            x.dims
         ));
     }
     // check that slope is broadcastable to x, trailing axes must match or be 1 (right-aligned)
@@ -260,9 +261,9 @@ fn prelu(out_name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
         if sd != 1 && sd != xd {
             return Err(anyhow!(
                 "PRelu: slope dims {:?} has incompatible axis {} with X dims {:?}",
-                &slope.dims,
-                &i,
-                &x.dims
+                slope.dims,
+                i,
+                x.dims
             ));
         }
     }
@@ -446,6 +447,7 @@ fn depth_to_space(
 }
 
 // TODO: I dont understand convolution properly, will come back to this later
+// TODO: According to ONNX spec, Conv some more optionally stuffs, which is ignored for now
 fn conv(
     out_name: &str,
     inputs: &[Option<&Tensor>],
@@ -464,12 +466,10 @@ fn conv(
             "Conv: auto_pad must be one of {valid_auto:?}, got '{auto_pad}'"
         ));
     }
-    if auto_pad != "NOTSET" {
-        if attr_ints(attrs, "pads")?.is_some() {
-            return Err(anyhow!(
-                "Conv: 'pads' attribute cannot be used with auto_pad '{auto_pad}'"
-            ));
-        }
+    if auto_pad != "NOTSET" && attr_ints(attrs, "pads")?.is_some() {
+        return Err(anyhow!(
+            "Conv: 'pads' attribute cannot be used with auto_pad '{auto_pad}'"
+        ));
     }
 
     let group = attr_i64(attrs, "group")?.copied().unwrap_or(1) as usize;
@@ -513,12 +513,12 @@ fn conv(
             "Conv: output channels {m} not divisible by group {group}"
         ));
     }
-    if let Some(ks) = attr_ints(attrs, "kernel_shape")? {
-        if ks != [kh as i64, kw as i64] {
-            return Err(anyhow!(
-                "Conv: kernel_shape {ks:?} disagrees with weights [{kh}, {kw}]"
-            ));
-        }
+    if let Some(ks) = attr_ints(attrs, "kernel_shape")?
+        && ks != [kh as i64, kw as i64]
+    {
+        return Err(anyhow!(
+            "Conv: kernel_shape {ks:?} disagrees with weights [{kh}, {kw}]"
+        ));
     }
 
     let bias: Option<&[f32]> = match inputs.get(2).copied().flatten() {
@@ -526,7 +526,7 @@ fn conv(
         Some(t) => {
             return Err(anyhow!(
                 "Conv: bias must have shape [{m}], got dims {:?}",
-                &t.dims
+                t.dims
             ));
         }
         None => None,
@@ -542,16 +542,16 @@ fn conv(
         let eff_kh = (k_h - 1) * dh + 1;
         let eff_kw = (k_w - 1) * dw + 1;
         // output sizes per SAME/VALID rule
-        let out_h = (hi + sh - 1) / sh; // ceil(hi / sh)
-        let out_w = (wi + sw - 1) / sw; // ceil(wi / sw)
+        let out_h = hi.div_ceil(sh); // ceil(hi / sh)
+        let out_w = wi.div_ceil(sw); // ceil(wi / sw)
         if auto_pad == "VALID" {
             [0usize, 0usize, 0usize, 0usize]
         } else {
             // SAME_UPPER or SAME_LOWER
-            let total_pad_h = (out_h - 1) * sh + eff_kh - hi;
-            let total_pad_w = (out_w - 1) * sw + eff_kw - wi;
-            let total_pad_h = total_pad_h.max(0) as usize;
-            let total_pad_w = total_pad_w.max(0) as usize;
+            let total_pad_h =
+                ((out_h as i64 - 1) * sh as i64 + eff_kh as i64 - hi as i64).max(0) as usize;
+            let total_pad_w =
+                ((out_w as i64 - 1) * sw as i64 + eff_kw as i64 - wi as i64).max(0) as usize;
             if auto_pad == "SAME_UPPER" {
                 // extra padding at the end (bottom/right)
                 let pt = total_pad_h / 2;
@@ -670,4 +670,83 @@ fn conv(
         vec![n as i64, m as i64, oh as i64, ow as i64],
         out,
     ))
+}
+
+fn add(out_name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
+    let x = slot(inputs, 0, "Add")?;
+    let y = slot(inputs, 1, "Add")?;
+
+    let x_dims = &x.dims;
+    let y_dims = &y.dims;
+
+    let rank = x_dims.len().max(y_dims.len());
+    let mut out_dims = Vec::with_capacity(rank);
+
+    for k in 0..rank {
+        let xi = x_dims.len() as isize - rank as isize + k as isize;
+        let yi = y_dims.len() as isize - rank as isize + k as isize;
+        let xd = if xi < 0 { 1 } else { x_dims[xi as usize] };
+        let yd = if yi < 0 { 1 } else { y_dims[yi as usize] };
+        let od = xd.max(yd);
+        if xd != 1 && xd != od {
+            return Err(anyhow!(
+                "Add: cannot broadcast X dims {:?} with Y dims {:?}",
+                x_dims,
+                y_dims
+            ));
+        }
+        if yd != 1 && yd != od {
+            return Err(anyhow!(
+                "Add: cannot broadcast X dims {:?} with Y dims {:?}",
+                x_dims,
+                y_dims
+            ));
+        }
+        out_dims.push(od);
+    }
+
+    let x_strides: Vec<usize> = if x_dims.is_empty() {
+        vec![]
+    } else {
+        x.strides().iter().map(|&s| s as usize).collect()
+    };
+    let y_strides: Vec<usize> = if y_dims.is_empty() {
+        vec![]
+    } else {
+        y.strides().iter().map(|&s| s as usize).collect()
+    };
+
+    let total: usize = out_dims.iter().map(|&d| d as usize).product();
+    let mut data = vec![0f32; total];
+
+    for i in 0..total {
+        let mut rem = i;
+        let mut coords = vec![0usize; rank];
+        for k in (0..rank).rev() {
+            let dim = out_dims[k] as usize;
+            coords[k] = rem % dim;
+            rem /= dim;
+        }
+        let mut sidx = 0usize;
+        let mut tidx = 0usize;
+        for k in 0..rank {
+            let xi = x_dims.len() as isize - rank as isize + k as isize;
+            if xi >= 0 {
+                let j = xi as usize;
+                if x_dims[j] != 1 {
+                    sidx += coords[k] * x_strides[j];
+                }
+            }
+            let yi = y_dims.len() as isize - rank as isize + k as isize;
+            if yi >= 0 {
+                let j = yi as usize;
+                if y_dims[j] != 1 {
+                    tidx += coords[k] * y_strides[j];
+                }
+            }
+        }
+        data[i] = x.data[sidx] + y.data[tidx];
+    }
+
+    Ok(Tensor::create(out_name.to_string(), out_dims, data))
 }
