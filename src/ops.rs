@@ -16,6 +16,7 @@ pub enum AttributesDataValue {
 }
 
 impl AttributesDataKind {
+    #[inline(always)]
     pub fn name(self) -> &'static str {
         match self {
             AttributesDataKind::F32 => "f32",
@@ -26,6 +27,16 @@ impl AttributesDataKind {
     }
 }
 
+#[rustfmt::skip]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, PartialOrd, Ord)]
+pub enum Operator {
+    Clip, Relu, PRelu,  DepthToSpace,
+    Conv, Gemm, MatMul, MaxPool,
+    AveragePool, Sigmoid, Flatten, Transpose,
+    Softmax, Add, Sub, Mul, Div,
+
+}
+
 #[derive(Clone, Copy)]
 pub struct OperatorSpec {
     pub min_opset: i64,
@@ -34,26 +45,15 @@ pub struct OperatorSpec {
     pub attrs: &'static [(&'static str, AttributesDataKind)],
 }
 
-#[rustfmt::skip]
-#[derive(Clone, Copy, PartialEq, Eq, Debug, PartialOrd, Ord)]
-pub enum Operator {
-    Gemm, MatMul, Conv, MaxPool,
-    AveragePool, Relu, PRelu, Sigmoid, Clip,
-    DepthToSpace, Flatten, Transpose, Softmax,
-    Add, Sub, Mul, Div,
-}
-
 impl Operator {
     #[inline(always)]
     #[rustfmt::skip]
     pub fn lookup(name: &str) -> Option<Operator> {
         let op = match name {
-            "Gemm" => Operator::Gemm, "MatMul" => Operator::MatMul, "Conv" => Operator::Conv,
-            "MaxPool" => Operator::MaxPool, "AveragePool" => Operator::AveragePool, "Relu" => Operator::Relu,
-            "PRelu" => Operator::PRelu, "Sigmoid" => Operator::Sigmoid, "Clip" => Operator::Clip,
-            "DepthToSpace" => Operator::DepthToSpace, "Flatten" => Operator::Flatten, "Transpose" => Operator::Transpose,
-            "Add" => Operator::Add, "Sub" => Operator::Sub, "Mul" => Operator::Mul,
-            "Div" => Operator::Div, "Softmax" => Operator::Softmax,
+            "Clip" => Operator::Clip, "Relu" => Operator::Relu, "PRelu" => Operator::PRelu, "DepthToSpace" => Operator::DepthToSpace,
+            "Conv" => Operator::Conv, "Gemm" => Operator::Gemm, "MatMul" => Operator::MatMul, "MaxPool" => Operator::MaxPool, 
+            "AveragePool" => Operator::AveragePool, "Sigmoid" => Operator::Sigmoid, "Flatten" => Operator::Flatten, "Transpose" => Operator::Transpose,
+            "Softmax" => Operator::Softmax, "Add" => Operator::Add, "Sub" => Operator::Sub, "Mul" => Operator::Mul, "Div" => Operator::Div, 
             _ => return None,
         };
         Some(op)
@@ -63,18 +63,56 @@ impl Operator {
     #[rustfmt::skip]
     pub fn static_name(self) -> &'static str {
         match self {
-            Operator::Gemm => "Gemm", Operator::MatMul => "MatMul", Operator::Conv => "Conv",
-            Operator::MaxPool => "MaxPool", Operator::AveragePool => "AveragePool", Operator::Relu => "Relu",
-            Operator::PRelu => "PRelu", Operator::Sigmoid => "Sigmoid", Operator::Clip => "Clip",
-            Operator::DepthToSpace => "DepthToSpace", Operator::Flatten => "Flatten", Operator::Transpose => "Transpose",
-            Operator::Add => "Add", Operator::Sub => "Sub", Operator::Mul => "Mul",
-            Operator::Div => "Div", Operator::Softmax => "Softmax",
+            Operator::Clip => "Clip", Operator::Relu => "Relu", Operator::PRelu => "PRelu", Operator::DepthToSpace => "DepthToSpace",
+            Operator::Conv => "Conv", Operator::Gemm => "Gemm", Operator::MatMul => "MatMul", Operator::MaxPool => "MaxPool",
+            Operator::AveragePool => "AveragePool", Operator::Sigmoid => "Sigmoid", Operator::Flatten => "Flatten", Operator::Transpose => "Transpose",
+            Operator::Softmax => "Softmax", Operator::Add => "Add", Operator::Sub => "Sub", Operator::Mul => "Mul", Operator::Div => "Div",
         }
     }
 
     #[inline(always)]
     pub fn spec(self) -> OperatorSpec {
         match self {
+            Operator::Clip => OperatorSpec {
+                min_opset: 11,
+                arity_in: (1, 3),
+                arity_out: (1, 1),
+                attrs: &[],
+            },
+            Operator::Relu => OperatorSpec {
+                min_opset: 13,
+                arity_in: (1, 1),
+                arity_out: (1, 1),
+                attrs: &[],
+            },
+            Operator::PRelu => OperatorSpec {
+                min_opset: 16,
+                arity_in: (2, 2),
+                arity_out: (1, 1),
+                attrs: &[],
+            },
+            Operator::DepthToSpace => OperatorSpec {
+                min_opset: 11,
+                arity_in: (1, 1),
+                arity_out: (1, 1),
+                attrs: &[
+                    ("blocksize", AttributesDataKind::I64),
+                    ("mode", AttributesDataKind::Str),
+                ],
+            },
+            Operator::Conv => OperatorSpec {
+                min_opset: 11,
+                arity_in: (2, 3),
+                arity_out: (1, 1),
+                attrs: &[
+                    ("auto_pad", AttributesDataKind::Str),
+                    ("dilations", AttributesDataKind::Ints),
+                    ("group", AttributesDataKind::I64),
+                    ("kernel_shape", AttributesDataKind::Ints),
+                    ("pads", AttributesDataKind::Ints),
+                    ("strides", AttributesDataKind::Ints),
+                ],
+            },
             Operator::Gemm => OperatorSpec {
                 min_opset: 13,
                 arity_in: (2, 3),
@@ -91,19 +129,6 @@ impl Operator {
                 arity_in: (2, 2),
                 arity_out: (1, 1),
                 attrs: &[],
-            },
-            Operator::Conv => OperatorSpec {
-                min_opset: 11,
-                arity_in: (2, 3),
-                arity_out: (1, 1),
-                attrs: &[
-                    ("auto_pad", AttributesDataKind::Str),
-                    ("dilations", AttributesDataKind::Ints),
-                    ("group", AttributesDataKind::I64),
-                    ("kernel_shape", AttributesDataKind::Ints),
-                    ("pads", AttributesDataKind::Ints),
-                    ("strides", AttributesDataKind::Ints),
-                ],
             },
             Operator::MaxPool => OperatorSpec {
                 min_opset: 12,
@@ -132,38 +157,11 @@ impl Operator {
                     ("strides", AttributesDataKind::Ints),
                 ],
             },
-            Operator::Relu => OperatorSpec {
-                min_opset: 13,
-                arity_in: (1, 1),
-                arity_out: (1, 1),
-                attrs: &[],
-            },
-            Operator::PRelu => OperatorSpec {
-                min_opset: 16,
-                arity_in: (2, 2),
-                arity_out: (1, 1),
-                attrs: &[],
-            },
             Operator::Sigmoid => OperatorSpec {
                 min_opset: 13,
                 arity_in: (1, 1),
                 arity_out: (1, 1),
                 attrs: &[],
-            },
-            Operator::Clip => OperatorSpec {
-                min_opset: 11,
-                arity_in: (1, 3),
-                arity_out: (1, 1),
-                attrs: &[],
-            },
-            Operator::DepthToSpace => OperatorSpec {
-                min_opset: 11,
-                arity_in: (1, 1),
-                arity_out: (1, 1),
-                attrs: &[
-                    ("blocksize", AttributesDataKind::I64),
-                    ("mode", AttributesDataKind::Str),
-                ],
             },
             Operator::Flatten => OperatorSpec {
                 min_opset: 13,
@@ -176,6 +174,12 @@ impl Operator {
                 arity_in: (1, 1),
                 arity_out: (1, 1),
                 attrs: &[("perm", AttributesDataKind::Ints)],
+            },
+            Operator::Softmax => OperatorSpec {
+                min_opset: 13,
+                arity_in: (1, 1),
+                arity_out: (1, 1),
+                attrs: &[("axis", AttributesDataKind::I64)],
             },
             Operator::Add => OperatorSpec {
                 min_opset: 14,
@@ -200,12 +204,6 @@ impl Operator {
                 arity_in: (2, 2),
                 arity_out: (1, 1),
                 attrs: &[("allowzero", AttributesDataKind::I64)],
-            },
-            Operator::Softmax => OperatorSpec {
-                min_opset: 13,
-                arity_in: (1, 1),
-                arity_out: (1, 1),
-                attrs: &[("axis", AttributesDataKind::I64)],
             },
         }
     }

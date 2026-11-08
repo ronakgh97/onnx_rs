@@ -27,12 +27,15 @@ impl Tensor {
             data: Arc::from(data),
         }
     }
+    #[inline]
     pub fn len(&self) -> usize {
         self.dims.iter().product::<i64>() as usize
     }
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+    #[inline]
     pub fn strides(&self) -> Vec<i64> {
         let mut strides = vec![1i64; self.dims.len()];
         for i in (0..self.dims.len() - 1).rev() {

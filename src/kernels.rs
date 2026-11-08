@@ -10,6 +10,7 @@ use std::arch::x86_64::{
 };
 
 impl Operator {
+    #[inline(always)]
     pub fn compute(
         self,
         out_name: &str,
@@ -18,10 +19,11 @@ impl Operator {
     ) -> Result<Tensor> {
         match self {
             Operator::Clip => clip(out_name, inputs),
+            Operator::Relu => relu(out_name, inputs),
             Operator::PRelu => prelu(out_name, inputs),
             Operator::DepthToSpace => depth_to_space(out_name, inputs, attrs),
             Operator::Conv => conv(out_name, inputs, attrs),
-            Operator::Gemm => gemm_kernel(out_name, inputs, attrs),
+            Operator::Gemm => todo!(),
             _ => Err(anyhow!(
                 "operator '{}' has no kernel implemented yet",
                 self.static_name()
@@ -132,24 +134,32 @@ fn read_four_int_attr(
     Ok([v[0] as usize, v[1] as usize, v[2] as usize, v[3] as usize])
 }
 
-// cmp::min(max, cmp::max(min, x))
-// if min is greater than max, then fill input with max
 fn clip(out_name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
     let x = slot(inputs, 0, "Clip")?;
-    let take = |slot: Option<&Tensor>, bound: &str| -> Result<Option<f32>> {
-        let Some(t) = slot else {
-            return Ok(None);
-        };
+    let min = if let Some(t) = inputs.get(1).copied().flatten() {
         if t.data.len() != 1 {
             return Err(anyhow!(
-                "Clip: {bound} must be a scalar (empty tensor), got {} elements",
+                "Clip: min (input 1) must be a scalar (empty tensor), got elements {}",
                 t.data.len()
             ));
         }
-        Ok(Some(t.data[0]))
+        Some(t.data[0])
+    } else {
+        None
     };
-    let min = take(inputs.get(1).copied().flatten(), "min (input 1)")?;
-    let max = take(inputs.get(2).copied().flatten(), "max (input 2)")?;
+    let max = if let Some(t) = inputs.get(2).copied().flatten() {
+        if t.data.len() != 1 {
+            return Err(anyhow!(
+                "Clip: max (input 2) must be a scalar (empty tensor), got elements {}",
+                t.data.len()
+            ));
+        }
+        Some(t.data[0])
+    } else {
+        None
+    };
+
+    // if min is greater than max, then fill input with max
     if let (Some(lo), Some(hi)) = (min, max) {
         if lo > hi {
             return Ok(Tensor::create(
@@ -160,6 +170,7 @@ fn clip(out_name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
         }
     }
 
+    // basically do this cmp::min(max, cmp::max(min, x))
     let min = min.unwrap_or(f32::MIN);
     let max = max.unwrap_or(f32::MAX);
     let mut out_data = vec![0f32; x.len()];
@@ -188,6 +199,43 @@ fn clip(out_name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
         x.dims.to_vec(),
         out_data,
     ))
+}
+
+fn relu(out_name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
+    let x = slot(inputs, 0, "Relu")?;
+
+    let mut data = vec![0f32; x.data.len()];
+    if x.data.is_empty() {
+        return Ok(Tensor::create(out_name.to_string(), x.dims.to_vec(), data));
+    }
+
+    if data.len() >= 8 {
+        // simd path
+        unsafe {
+            let zero = _mm256_setzero_ps();
+
+            let (input_chunks, input_remainder) = x.data.as_chunks::<8>();
+            let (output_chunks, output_remainder) = data.as_chunks_mut::<8>();
+
+            for (input, output) in input_chunks.iter().zip(output_chunks.iter_mut()) {
+                let v = _mm256_loadu_ps(input.as_ptr());
+                let result = _mm256_max_ps(v, zero);
+                _mm256_storeu_ps(output.as_mut_ptr(), result);
+            }
+
+            // leftover tail (fewer than 8 floats)
+            for (input, output) in input_remainder.iter().zip(output_remainder.iter_mut()) {
+                *output = input.max(0.0);
+            }
+        }
+    } else {
+        // scalar path
+        for (&v, out) in x.data.iter().zip(data.iter_mut()) {
+            *out = v.max(0.0);
+        }
+    }
+
+    Ok(Tensor::create(out_name.to_string(), x.dims.to_vec(), data))
 }
 
 fn prelu(out_name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
@@ -394,5 +442,232 @@ fn depth_to_space(
         out_name.to_string(),
         vec![ni as i64, co as i64, oh as i64, ow as i64],
         data,
+    ))
+}
+
+// TODO: I dont understand convolution properly, will come back to this later
+fn conv(
+    out_name: &str,
+    inputs: &[Option<&Tensor>],
+    attrs: &[(String, AttributesDataValue)],
+) -> Result<Tensor> {
+    // take two required inputs: X and W, and optional bias
+    let x = slot(inputs, 0, "Conv")?;
+    let w = slot(inputs, 1, "Conv")?;
+
+    // handle attributes: auto_pad, group, strides, dilations, pads, kernel_shape
+
+    let valid_auto = ["NOTSET", "SAME_UPPER", "SAME_LOWER", "VALID"];
+    let auto_pad = attr_str(attrs, "auto_pad")?.unwrap_or("NOTSET");
+    if !valid_auto.contains(&auto_pad) {
+        return Err(anyhow!(
+            "Conv: auto_pad must be one of {valid_auto:?}, got '{auto_pad}'"
+        ));
+    }
+    if auto_pad != "NOTSET" {
+        if attr_ints(attrs, "pads")?.is_some() {
+            return Err(anyhow!(
+                "Conv: 'pads' attribute cannot be used with auto_pad '{auto_pad}'"
+            ));
+        }
+    }
+
+    let group = attr_i64(attrs, "group")?.copied().unwrap_or(1) as usize;
+    if group == 0 {
+        return Err(anyhow!("Conv: group must be >= 1"));
+    }
+
+    let [sh, sw] = read_two_int_attr(attrs, "strides", [1, 1])?;
+    let [dh, dw] = read_two_int_attr(attrs, "dilations", [1, 1])?;
+    if sh == 0 || sw == 0 || dh == 0 || dw == 0 {
+        return Err(anyhow!("Conv: strides/dilations must be positive"));
+    }
+
+    let (xd, wd) = (&x.dims, &w.dims);
+    if xd.len() != 4 || wd.len() != 4 {
+        return Err(anyhow!(
+            "Conv: wants rank-4 NCHW X and weights, got ranks {}/{}",
+            xd.len(),
+            wd.len()
+        ));
+    }
+    let [n, cin, hi, wi] = [
+        xd[0] as usize,
+        xd[1] as usize,
+        xd[2] as usize,
+        xd[3] as usize,
+    ];
+    let [m, wcin, kh, kw] = [
+        wd[0] as usize,
+        wd[1] as usize,
+        wd[2] as usize,
+        wd[3] as usize,
+    ];
+    if cin != wcin * group {
+        return Err(anyhow!(
+            "Conv: X channels {cin} != weights channels {wcin} * group {group}"
+        ));
+    }
+    if m % group != 0 {
+        return Err(anyhow!(
+            "Conv: output channels {m} not divisible by group {group}"
+        ));
+    }
+    if let Some(ks) = attr_ints(attrs, "kernel_shape")? {
+        if ks != [kh as i64, kw as i64] {
+            return Err(anyhow!(
+                "Conv: kernel_shape {ks:?} disagrees with weights [{kh}, {kw}]"
+            ));
+        }
+    }
+
+    let bias: Option<&[f32]> = match inputs.get(2).copied().flatten() {
+        Some(t) if t.dims.as_ref() == [m as i64] => Some(t.data.as_ref()),
+        Some(t) => {
+            return Err(anyhow!(
+                "Conv: bias must have shape [{m}], got dims {:?}",
+                &t.dims
+            ));
+        }
+        None => None,
+    };
+
+    let [pt, pl, pb, pr]: [usize; 4] = if auto_pad == "NOTSET" {
+        read_four_int_attr(attrs, "pads", [0, 0, 0, 0])?
+    } else {
+        // kernel_shape (spatial) from weights
+        let k_h = kh;
+        let k_w = kw;
+        // effective kernel sizes
+        let eff_kh = (k_h - 1) * dh + 1;
+        let eff_kw = (k_w - 1) * dw + 1;
+        // output sizes per SAME/VALID rule
+        let out_h = (hi + sh - 1) / sh; // ceil(hi / sh)
+        let out_w = (wi + sw - 1) / sw; // ceil(wi / sw)
+        if auto_pad == "VALID" {
+            [0usize, 0usize, 0usize, 0usize]
+        } else {
+            // SAME_UPPER or SAME_LOWER
+            let total_pad_h = (out_h - 1) * sh + eff_kh - hi;
+            let total_pad_w = (out_w - 1) * sw + eff_kw - wi;
+            let total_pad_h = total_pad_h.max(0) as usize;
+            let total_pad_w = total_pad_w.max(0) as usize;
+            if auto_pad == "SAME_UPPER" {
+                // extra padding at the end (bottom/right)
+                let pt = total_pad_h / 2;
+                let pb = total_pad_h - pt;
+                let pl = total_pad_w / 2;
+                let pr = total_pad_w - pl;
+                [pt, pl, pb, pr]
+            } else {
+                // SAME_LOWER: extra at beginning (top/left)
+                let pb = total_pad_h / 2;
+                let pt = total_pad_h - pb;
+                let pr = total_pad_w / 2;
+                let pl = total_pad_w - pr;
+                [pt, pl, pb, pr]
+            }
+        }
+    };
+
+    // compute output dims from explicit/computed pads
+    let oh_ext = hi as i64 + pt as i64 + pb as i64 - ((kh as i64 - 1) * dh as i64 + 1);
+    let ow_ext = wi as i64 + pl as i64 + pr as i64 - ((kw as i64 - 1) * dw as i64 + 1);
+    if oh_ext < 0 || ow_ext < 0 {
+        return Err(anyhow!(
+            "Conv: kernel [{kh}×{kw}] does not fit into [{hi}×{wi}] with pads [{pt},{pl},{pb},{pr}]"
+        ));
+    }
+    let (oh, ow) = (oh_ext / sh as i64 + 1, ow_ext / sw as i64 + 1);
+    let (oh, ow) = (oh as usize, ow as usize);
+    let p = oh * ow;
+
+    // group convolutions
+    let m_g = m / group; // output channels per group
+    let c_g = cin / group; // input channels per group
+    let k_g = c_g * kh * kw; // K per group
+
+    let mut out = vec![0f32; n * m * p];
+
+    // We reuse a single im2col buffer for all groups (max K per group = k_g <= k_total)
+    let mut col = vec![0f32; k_g * p]; // [K_g, P] column-major
+    let mut ycm = vec![0f32; m_g * p]; // [M_g, P] column-major
+
+    for ni in 0..n {
+        let xbase_n = ni * cin * hi * wi;
+        for g in 0..group {
+            // weight slice for this group: W[g*m_g .. (g+1)*m_g, :] -> [M_g, K_g]
+            let w_start = g * m_g * k_g;
+            let w_end = w_start + m_g * k_g;
+            let wg = &w.data[w_start..w_end];
+
+            // input channel range for this group
+            let c_start = g * c_g;
+            // c_end = c_start + c_g
+
+            // im2col for this group
+            let mut pcol = 0usize;
+            for ohi in 0..oh {
+                for owi in 0..ow {
+                    let coloff = pcol * k_g;
+                    for ci in 0..c_g {
+                        let rowoff = coloff + ci * kh * kw;
+                        let xchan = xbase_n + (c_start + ci) * hi * wi;
+                        for khi in 0..kh {
+                            let ih = ohi * sh + khi * dh;
+                            let ih = ih as i64 - pt as i64;
+                            if !(0..hi as i64).contains(&ih) {
+                                continue;
+                            }
+                            for kwi in 0..kw {
+                                let iw = owi * sw + kwi * dw;
+                                let iw = iw as i64 - pl as i64;
+                                if !(0..wi as i64).contains(&iw) {
+                                    continue;
+                                }
+                                col[rowoff + khi * kw + kwi] =
+                                    x.data[xchan + ih as usize * wi + iw as usize];
+                            }
+                        }
+                    }
+                    pcol += 1;
+                }
+            }
+
+            // gemm: Wg^T[M_g, K_g] · col[K_g, P] = Yg[M_g, P]
+            // Wg is row-major [M_g, K_g] -> treat as col-major [K_g, M_g] with trans_a
+            lvl3::gemm(
+                m_g,
+                p,
+                k_g,
+                1.0,
+                wg,
+                k_g, // lda = K_g for trans_a
+                col.as_slice(),
+                k_g,
+                0.0,
+                ycm.as_mut_slice(),
+                m_g,
+                true,
+                false,
+            );
+
+            // scatter + bias
+            let bias_g = bias.map(|b| &b[g * m_g..(g + 1) * m_g]);
+            let outbase_g = ni * m * p + g * m_g * p;
+            for mi in 0..m_g {
+                let add = bias_g.map_or(0.0, |b| b[mi]);
+                for j in 0..p {
+                    let (ohi, owi) = (j / ow, j % ow);
+                    out[outbase_g + (mi * oh + ohi) * ow + owi] = ycm[j * m_g + mi] + add;
+                }
+            }
+        }
+    }
+
+    Ok(Tensor::create(
+        out_name.to_string(),
+        vec![n as i64, m as i64, oh as i64, ow as i64],
+        out,
     ))
 }
