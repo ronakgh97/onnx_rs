@@ -1,5 +1,4 @@
 //! Kernel implementations for ONNX operators.
-
 use crate::ops::{AttributesDataValue, Operator};
 use crate::tensor::Tensor;
 use anyhow::{Result, anyhow};
@@ -18,11 +17,11 @@ impl Operator {
         attrs: &[(String, AttributesDataValue)],
     ) -> Result<Tensor> {
         match self {
-            Operator::PRelu => prelu(out_name, inputs),
-            Operator::Gemm => gemm_kernel(out_name, inputs, attrs),
             Operator::Clip => clip(out_name, inputs),
+            Operator::PRelu => prelu(out_name, inputs),
             Operator::DepthToSpace => depth_to_space(out_name, inputs, attrs),
             Operator::Conv => conv(out_name, inputs, attrs),
+            Operator::Gemm => gemm_kernel(out_name, inputs, attrs),
             _ => Err(anyhow!(
                 "operator '{}' has no kernel implemented yet",
                 self.static_name()
@@ -311,4 +310,89 @@ fn prelu(out_name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
     }
 
     Ok(Tensor::create(out_name.to_string(), x_dims.to_vec(), data))
+}
+
+fn depth_to_space(
+    out_name: &str,
+    inputs: &[Option<&Tensor>],
+    attrs: &[(String, AttributesDataValue)],
+) -> Result<Tensor> {
+    let x = slot(inputs, 0, "DepthToSpace")?;
+    let mode = attr_str(attrs, "mode")?;
+
+    let dims = &x.dims;
+    if dims.len() != 4 {
+        return Err(anyhow!(
+            "DepthToSpace: wants rank-4 NCHW, got rank {}",
+            dims.len()
+        ));
+    }
+
+    let blocksize = if let Some(bs) = attr_i64(attrs, "blocksize")? {
+        if *bs < 1 {
+            return Err(anyhow!("DepthToSpace: blocksize must be >= 1, got {bs}"));
+        } else {
+            *bs as usize
+        }
+    } else {
+        return Err(anyhow!(
+            "DepthToSpace: missing required attribute 'blocksize'"
+        ));
+    };
+
+    let is_default = match mode {
+        Some("DCR") | None => true,
+        Some("CRD") => false,
+        _ => {
+            return Err(anyhow!(
+                "DepthToSpace: unsupported mode '{:?}', only 'DCR' and 'CRD' are supported",
+                mode
+            ));
+        }
+    };
+
+    let [ni, cin, h, w] = [
+        dims[0] as usize,
+        dims[1] as usize,
+        dims[2] as usize,
+        dims[3] as usize,
+    ];
+    if cin % (blocksize * blocksize) != 0 {
+        return Err(anyhow!(
+            "DepthToSpace: channels {cin} are not divisible by blocksize^2({})",
+            blocksize * blocksize
+        ));
+    }
+    let co = cin / (blocksize * blocksize); // output channels
+    let (oh, ow) = (h * blocksize, w * blocksize); //  output height and width
+
+    let mut data = vec![0f32; x.data.len()];
+    for n in 0..ni {
+        for c in 0..co {
+            for i in 0..blocksize {
+                for j in 0..blocksize {
+                    // which input slice feeds output offset (i, j)
+                    // inside each blocksize*blocksize block
+                    let ci = if is_default {
+                        (i * blocksize + j) * co + c
+                    } else {
+                        c * blocksize * blocksize + i * blocksize + j
+                    };
+                    for hi in 0..h {
+                        let src = &x.data[((n * cin + ci) * h + hi) * w..][..w];
+                        let dst_row = ((n * co + c) * oh + hi * blocksize + i) * ow;
+                        for wi in 0..w {
+                            data[dst_row + wi * blocksize + j] = src[wi];
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(Tensor::create(
+        out_name.to_string(),
+        vec![ni as i64, co as i64, oh as i64, ow as i64],
+        data,
+    ))
 }
