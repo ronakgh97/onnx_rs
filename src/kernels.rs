@@ -1,6 +1,9 @@
 //! Kernel implementations for ONNX operators.
-use crate::ops::{AttributesDataValue, Operator};
-use crate::tensor::Tensor;
+use crate::ops::{
+    AttributesDataValue, Operator, take_attr_i64, take_attr_ints, take_attr_str,
+    take_four_attr_int, take_two_attr_int,
+};
+use crate::tensor::{Tensor, take_tensor};
 use anyhow::{Result, anyhow};
 use blas_rs::*;
 use std::arch::x86_64::{
@@ -31,111 +34,8 @@ impl Operator {
     }
 }
 
-#[inline(always)]
-fn slot<'s>(inputs: &'s [Option<&'s Tensor>], index: usize, op_name: &str) -> Result<&'s Tensor> {
-    let Some(t) = inputs.get(index).copied().flatten() else {
-        return Err(anyhow!("{op_name}: required input slot #{index} is absent"));
-    };
-    Ok(t)
-}
-
-#[inline(always)]
-#[allow(unused)]
-fn attr_f32<'s>(attrs: &'s [(String, AttributesDataValue)], name: &str) -> Result<Option<&'s f32>> {
-    for (k, v) in attrs {
-        if k == name {
-            let AttributesDataValue::F32(v) = v else {
-                return Err(anyhow!("attribute '{name}': wrong payload kind"));
-            };
-            return Ok(Some(v));
-        }
-    }
-    Ok(None)
-}
-
-#[inline(always)]
-fn attr_i64<'s>(attrs: &'s [(String, AttributesDataValue)], name: &str) -> Result<Option<&'s i64>> {
-    for (k, v) in attrs {
-        if k == name {
-            let AttributesDataValue::I64(v) = v else {
-                return Err(anyhow!("attribute '{name}': wrong payload kind"));
-            };
-            return Ok(Some(v));
-        }
-    }
-    Ok(None)
-}
-
-#[inline(always)]
-fn attr_str<'s>(attrs: &'s [(String, AttributesDataValue)], name: &str) -> Result<Option<&'s str>> {
-    for (k, v) in attrs {
-        if k == name {
-            let AttributesDataValue::Str(s) = v else {
-                return Err(anyhow!("attribute '{name}': wrong payload kind"));
-            };
-            return Ok(Some(s));
-        }
-    }
-    Ok(None)
-}
-
-#[inline(always)]
-fn attr_ints<'s>(
-    attrs: &'s [(String, AttributesDataValue)],
-    name: &str,
-) -> Result<Option<&'s [i64]>> {
-    for (k, v) in attrs {
-        if k == name {
-            let AttributesDataValue::Ints(v) = v else {
-                return Err(anyhow!("attribute '{name}': wrong payload kind"));
-            };
-            return Ok(Some(v));
-        }
-    }
-    Ok(None)
-}
-
-fn read_two_int_attr(
-    attrs: &[(String, AttributesDataValue)],
-    name: &str,
-    default: [i64; 2],
-) -> Result<[usize; 2]> {
-    let Some(v) = attr_ints(attrs, name)? else {
-        return Ok([default[0] as usize, default[1] as usize]);
-    };
-    if v.len() != 2 {
-        return Err(anyhow!("attribute '{name}': wants 2 ints, got {}", v.len()));
-    }
-    if v.iter().any(|&x| x < 0) {
-        return Err(anyhow!("attribute '{name}': negative value"));
-    }
-    Ok([v[0] as usize, v[1] as usize])
-}
-
-fn read_four_int_attr(
-    attrs: &[(String, AttributesDataValue)],
-    name: &str,
-    default: [i64; 4],
-) -> Result<[usize; 4]> {
-    let Some(v) = attr_ints(attrs, name)? else {
-        return Ok([
-            default[0] as usize,
-            default[1] as usize,
-            default[2] as usize,
-            default[3] as usize,
-        ]);
-    };
-    if v.len() != 4 {
-        return Err(anyhow!("attribute '{name}': wants 4 ints, got {}", v.len()));
-    }
-    if v.iter().any(|&x| x < 0) {
-        return Err(anyhow!("attribute '{name}': negative value"));
-    }
-    Ok([v[0] as usize, v[1] as usize, v[2] as usize, v[3] as usize])
-}
-
 fn clip(out_name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
-    let x = slot(inputs, 0, "Clip")?;
+    let x = take_tensor(inputs, 0, "Clip")?;
     let min = if let Some(t) = inputs.get(1).copied().flatten() {
         if t.data.len() != 1 {
             return Err(anyhow!(
@@ -194,7 +94,7 @@ fn clip(out_name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
 }
 
 fn relu(out_name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
-    let x = slot(inputs, 0, "Relu")?;
+    let x = take_tensor(inputs, 0, "Relu")?;
 
     let mut data = vec![0f32; x.data.len()];
     if x.data.is_empty() {
@@ -232,8 +132,8 @@ fn relu(out_name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
 }
 
 fn prelu(out_name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
-    let x = slot(inputs, 0, "PRelu")?;
-    let slope = slot(inputs, 1, "PRelu")?;
+    let x = take_tensor(inputs, 0, "PRelu")?;
+    let slope = take_tensor(inputs, 1, "PRelu")?;
     let x_dims = &x.dims;
     let s_dims = &slope.dims;
     // if slope has more dimensions than x, it cannot be broadcasted to x
@@ -354,8 +254,8 @@ fn depth_to_space(
     inputs: &[Option<&Tensor>],
     attrs: &[(String, AttributesDataValue)],
 ) -> Result<Tensor> {
-    let x = slot(inputs, 0, "DepthToSpace")?;
-    let mode = attr_str(attrs, "mode")?;
+    let x = take_tensor(inputs, 0, "DepthToSpace")?;
+    let mode = take_attr_str(attrs, "mode")?;
 
     let dims = &x.dims;
     if dims.len() != 4 {
@@ -365,7 +265,7 @@ fn depth_to_space(
         ));
     }
 
-    let blocksize = if let Some(bs) = attr_i64(attrs, "blocksize")? {
+    let blocksize = if let Some(bs) = take_attr_i64(attrs, "blocksize")? {
         if *bs < 1 {
             return Err(anyhow!("DepthToSpace: blocksize must be >= 1, got {bs}"));
         } else {
@@ -442,31 +342,31 @@ fn conv(
     attrs: &[(String, AttributesDataValue)],
 ) -> Result<Tensor> {
     // take two required inputs: X and W, and optional bias
-    let x = slot(inputs, 0, "Conv")?;
-    let w = slot(inputs, 1, "Conv")?;
+    let x = take_tensor(inputs, 0, "Conv")?;
+    let w = take_tensor(inputs, 1, "Conv")?;
 
     // handle attributes: auto_pad, group, strides, dilations, pads, kernel_shape
 
     let valid_auto = ["NOTSET", "SAME_UPPER", "SAME_LOWER", "VALID"];
-    let auto_pad = attr_str(attrs, "auto_pad")?.unwrap_or("NOTSET");
+    let auto_pad = take_attr_str(attrs, "auto_pad")?.unwrap_or("NOTSET");
     if !valid_auto.contains(&auto_pad) {
         return Err(anyhow!(
             "Conv: auto_pad must be one of {valid_auto:?}, got '{auto_pad}'"
         ));
     }
-    if auto_pad != "NOTSET" && attr_ints(attrs, "pads")?.is_some() {
+    if auto_pad != "NOTSET" && take_attr_ints(attrs, "pads")?.is_some() {
         return Err(anyhow!(
             "Conv: 'pads' attribute cannot be used with auto_pad '{auto_pad}'"
         ));
     }
 
-    let group = attr_i64(attrs, "group")?.copied().unwrap_or(1) as usize;
+    let group = take_attr_i64(attrs, "group")?.copied().unwrap_or(1) as usize;
     if group == 0 {
         return Err(anyhow!("Conv: group must be >= 1"));
     }
 
-    let [sh, sw] = read_two_int_attr(attrs, "strides", [1, 1])?;
-    let [dh, dw] = read_two_int_attr(attrs, "dilations", [1, 1])?;
+    let [sh, sw] = take_two_attr_int(attrs, "strides", [1, 1])?;
+    let [dh, dw] = take_two_attr_int(attrs, "dilations", [1, 1])?;
     if sh == 0 || sw == 0 || dh == 0 || dw == 0 {
         return Err(anyhow!("Conv: strides/dilations must be positive"));
     }
@@ -501,7 +401,7 @@ fn conv(
             "Conv: output channels {m} not divisible by group {group}"
         ));
     }
-    if let Some(ks) = attr_ints(attrs, "kernel_shape")?
+    if let Some(ks) = take_attr_ints(attrs, "kernel_shape")?
         && ks != [kh as i64, kw as i64]
     {
         return Err(anyhow!(
@@ -521,7 +421,7 @@ fn conv(
     };
 
     let [pt, pl, pb, pr]: [usize; 4] = if auto_pad == "NOTSET" {
-        read_four_int_attr(attrs, "pads", [0, 0, 0, 0])?
+        take_four_attr_int(attrs, "pads", [0, 0, 0, 0])?
     } else {
         // kernel_shape (spatial) from weights
         let k_h = kh;
@@ -670,8 +570,8 @@ fn conv(
 }
 
 fn add(out_name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
-    let x = slot(inputs, 0, "Add")?;
-    let y = slot(inputs, 1, "Add")?;
+    let x = take_tensor(inputs, 0, "Add")?;
+    let y = take_tensor(inputs, 1, "Add")?;
 
     let x_dims = &x.dims;
     let y_dims = &y.dims;

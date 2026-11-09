@@ -1,5 +1,5 @@
 //! Tensor utilities
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use std::sync::Arc;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -56,4 +56,16 @@ impl Tensor {
         }
         strides
     }
+}
+
+#[inline(always)]
+pub fn take_tensor<'s>(
+    inputs: &'s [Option<&'s Tensor>],
+    index: usize,
+    op_name: &str,
+) -> Result<&'s Tensor> {
+    let Some(t) = inputs.get(index).copied().flatten() else {
+        return Err(anyhow!("{op_name}: required input slot #{index} is absent"));
+    };
+    Ok(t)
 }

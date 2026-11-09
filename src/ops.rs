@@ -1,4 +1,6 @@
 //! Onnx operator specifications and attributes
+use anyhow::anyhow;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum AttributesDataKind {
     F32,
@@ -47,6 +49,111 @@ impl AttributesDataKind {
             _ => None,
         }
     }
+}
+
+#[allow(unused)]
+pub fn take_attr_f32<'s>(
+    attrs: &'s [(String, AttributesDataValue)],
+    name: &str,
+) -> anyhow::Result<Option<&'s f32>> {
+    for (k, v) in attrs {
+        if k == name {
+            let AttributesDataValue::F32(v) = v else {
+                return Err(anyhow!("attribute '{name}': wrong payload kind"));
+            };
+            return Ok(Some(v));
+        }
+    }
+    Ok(None)
+}
+
+#[inline(always)]
+pub fn take_attr_i64<'s>(
+    attrs: &'s [(String, AttributesDataValue)],
+    name: &str,
+) -> anyhow::Result<Option<&'s i64>> {
+    for (k, v) in attrs {
+        if k == name {
+            let AttributesDataValue::I64(v) = v else {
+                return Err(anyhow!("attribute '{name}': wrong payload kind"));
+            };
+            return Ok(Some(v));
+        }
+    }
+    Ok(None)
+}
+
+#[inline(always)]
+pub fn take_attr_str<'s>(
+    attrs: &'s [(String, AttributesDataValue)],
+    name: &str,
+) -> anyhow::Result<Option<&'s str>> {
+    for (k, v) in attrs {
+        if k == name {
+            let AttributesDataValue::Str(s) = v else {
+                return Err(anyhow!("attribute '{name}': wrong payload kind"));
+            };
+            return Ok(Some(s));
+        }
+    }
+    Ok(None)
+}
+
+#[inline(always)]
+pub fn take_attr_ints<'s>(
+    attrs: &'s [(String, AttributesDataValue)],
+    name: &str,
+) -> anyhow::Result<Option<&'s [i64]>> {
+    for (k, v) in attrs {
+        if k == name {
+            let AttributesDataValue::Ints(v) = v else {
+                return Err(anyhow!("attribute '{name}': wrong payload kind"));
+            };
+            return Ok(Some(v));
+        }
+    }
+    Ok(None)
+}
+
+#[inline(always)]
+pub fn take_two_attr_int(
+    attrs: &[(String, AttributesDataValue)],
+    name: &str,
+    default: [i64; 2],
+) -> anyhow::Result<[usize; 2]> {
+    let Some(v) = take_attr_ints(attrs, name)? else {
+        return Ok([default[0] as usize, default[1] as usize]);
+    };
+    if v.len() != 2 {
+        return Err(anyhow!("attribute '{name}': wants 2 ints, got {}", v.len()));
+    }
+    if v.iter().any(|&x| x < 0) {
+        return Err(anyhow!("attribute '{name}': negative value"));
+    }
+    Ok([v[0] as usize, v[1] as usize])
+}
+
+#[inline(always)]
+pub fn take_four_attr_int(
+    attrs: &[(String, AttributesDataValue)],
+    name: &str,
+    default: [i64; 4],
+) -> anyhow::Result<[usize; 4]> {
+    let Some(v) = take_attr_ints(attrs, name)? else {
+        return Ok([
+            default[0] as usize,
+            default[1] as usize,
+            default[2] as usize,
+            default[3] as usize,
+        ]);
+    };
+    if v.len() != 4 {
+        return Err(anyhow!("attribute '{name}': wants 4 ints, got {}", v.len()));
+    }
+    if v.iter().any(|&x| x < 0) {
+        return Err(anyhow!("attribute '{name}': negative value"));
+    }
+    Ok([v[0] as usize, v[1] as usize, v[2] as usize, v[3] as usize])
 }
 
 #[rustfmt::skip]

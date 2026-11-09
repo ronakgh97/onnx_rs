@@ -1,6 +1,8 @@
 //! Minimal protobuf definitions for parsing .onnx files
 use prost::Message;
 
+// References: https://github.com/onnx/onnx/blob/main/onnx/onnx.in.proto
+
 #[derive(Clone, PartialEq, Message)]
 pub struct ModelProto {
     #[prost(int64, optional, tag = "1")]
