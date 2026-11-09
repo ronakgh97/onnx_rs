@@ -13,4 +13,5 @@ anyhow = "1.0.104"
 blas-rs = "1.1.0-alpha.2"
 
 [dev-dependencies]
-# image = "0.25.10"
+ort = { git = "https://github.com/pykeio/ort" }
+image = "0.25.10"

@@ -7,7 +7,7 @@ fn main() -> Result<()> {
     println!("input needed: {:?}", model.inputs);
     println!("output given: {:?}", model.outputs);
     println!("node count: {:?}", model.nodes.len());
-    println!("operators needed: {:?}", model.operators());
+    println!("operators used: {:?}", model.operators());
 
     Ok(())
 }
