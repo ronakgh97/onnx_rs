@@ -1,4 +1,5 @@
 //! Tensor utilities
+use anyhow::Result;
 use std::sync::Arc;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -15,21 +16,31 @@ pub struct TensorSpec {
 }
 
 impl Tensor {
-    pub fn create(name: &str, dims: &[i64], data: &[f32]) -> Self {
-        assert_eq!(
-            dims.iter().product::<i64>() as usize,
-            data.len(),
-            "Tensor dimensions do not match data length"
-        );
-        Self {
+    pub fn create(name: &str, dims: &[i64], data: &[f32]) -> Result<Self> {
+        // calculate numel with overflow checks
+        let numel = dims
+            .iter()
+            .try_fold(1usize, |a, &d| {
+                usize::try_from(d).ok().and_then(|d| a.checked_mul(d))
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!("Tensor '{name}': dims {dims:?} overflow element count")
+            })?;
+        if numel != data.len() {
+            return Err(anyhow::anyhow!(
+                "Tensor '{name}': dims {dims:?} has {numel} elements, but data has {} elements",
+                data.len()
+            ));
+        }
+        Ok(Self {
             name: Arc::from(name),
             dims: Arc::from(dims),
             data: Arc::from(data),
-        }
+        })
     }
     #[inline]
     pub fn len(&self) -> usize {
-        self.dims.iter().product::<i64>() as usize
+        self.data.len()
     }
     #[inline]
     pub fn is_empty(&self) -> bool {

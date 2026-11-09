@@ -2,10 +2,23 @@
 name = "onnx-rs"
 version = "1.0.0"
 edition = "2024"
+authors = ["ronakgh {ronakgh97@gmail.com}"]
+description = "A pure rust implementation of onnx runtime"
+license = "MIT"
+repository = "https://github.com/ronakgh97/onnx_rs"
+readme = "README.md"
+categories = ["artificial-intelligence"]
+keywords = ["onnx", "runtimes", "inference", "neural-networks", "ai"]
 
 [lib]
 name = "onnx_rs"
 path = "src/lib.rs"
+
+[profile.release]
+opt-level = 1
+codegen-units = 8
+lto = "fat"
+debug = false
 
 [dependencies]
 prost = "0.14.4"

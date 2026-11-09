@@ -193,7 +193,11 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
         }
         // initializer must be f32 only
         if tensor.data_type != 1 {
-            return Err(anyhow!("initializer: '{}' is not f32 dtype", tensor.name));
+            return Err(anyhow!(
+                "initializer: '{}' must be f32 dtype, got {}",
+                tensor.name,
+                dtype_name(tensor.data_type)
+            ));
         }
 
         // check negative dim & numel overflows
@@ -214,7 +218,7 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
         // if this creating bad cases to handle, I will lose my shit
         if numel == 0 {
             defined.insert(tensor.name.clone());
-            initializers.push(Tensor::create(&tensor.name, &tensor.dims, &[]));
+            initializers.push(Tensor::create(&tensor.name, &tensor.dims, &[])?);
             continue;
         }
 
@@ -266,7 +270,7 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
                     tensor.raw_data.len()
                 ));
             }
-            Tensor::create(&tensor.name, &tensor.dims, &raw_as_f32(&tensor.raw_data))
+            Tensor::create(&tensor.name, &tensor.dims, &raw_as_f32(&tensor.raw_data))?
         } else {
             if tensor.float_data.len() as u64 != numel {
                 return Err(anyhow!(
@@ -275,7 +279,7 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
                     tensor.float_data.len()
                 ));
             }
-            Tensor::create(&tensor.name, &tensor.dims, &tensor.float_data)
+            Tensor::create(&tensor.name, &tensor.dims, &tensor.float_data)?
         };
 
         defined.insert(tensor.name.to_string());

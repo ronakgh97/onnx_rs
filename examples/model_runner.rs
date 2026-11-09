@@ -6,16 +6,16 @@ use ort::{inputs, session::Session};
 use std::time::Instant;
 
 fn main() -> Result<()> {
-    let in_image = image::open("image_sample.png")?.to_rgb8();
+    let in_image = image::open("input_image.png")?.to_rgb8();
 
     println!("running onnx_rs... ");
     let start = Instant::now();
-    let model = Model::from_file("srgan_onnx/srgan_single.onnx")?;
+    let model = Model::from_file("models/srgan_onnx/srgan_single.onnx")?;
 
     let mut data = vec![0f32; 3 * 128 * 128];
     fill_tensor_from_image(&in_image, &mut data);
 
-    let input = Tensor::create("inputs", &[1, 3, 128, 128], &data);
+    let input = Tensor::create("inputs", &[1, 3, 128, 128], &data)?;
     let output = model.run_single(&input)?;
     save_image_from_tensor(&output.data, "onnx_rs_output.png")?;
     println!("done in : {:?}", start.elapsed());
@@ -29,7 +29,7 @@ fn main() -> Result<()> {
     let mut session = Session::builder(&env)?
         .with_execution_providers([CPU::default().build()])
         .map_err(|e| anyhow::anyhow!("unable to set execution providers: {e}"))?
-        .commit_from_file("srgan_onnx/srgan_single.onnx")?;
+        .commit_from_file("models/srgan_onnx/srgan_single.onnx")?;
 
     let mut data = vec![0f32; 3 * 128 * 128];
     fill_tensor_from_image(&in_image, &mut data);

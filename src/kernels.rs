@@ -163,7 +163,7 @@ fn clip(out_name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
     if let (Some(lo), Some(hi)) = (min, max)
         && lo > hi
     {
-        return Ok(Tensor::create(out_name, &x.dims, &vec![hi; x.len()]));
+        return Tensor::create(out_name, &x.dims, &vec![hi; x.len()]);
     }
 
     // basically do this cmp::min(max, cmp::max(min, x))
@@ -190,7 +190,7 @@ fn clip(out_name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
         }
     }
 
-    Ok(Tensor::create(out_name, &x.dims, &out_data))
+    Tensor::create(out_name, &x.dims, &out_data)
 }
 
 fn relu(out_name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
@@ -198,7 +198,7 @@ fn relu(out_name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
 
     let mut data = vec![0f32; x.data.len()];
     if x.data.is_empty() {
-        return Ok(Tensor::create(out_name, &x.dims, &data));
+        return Tensor::create(out_name, &x.dims, &data);
     }
 
     if data.len() >= 8 {
@@ -210,6 +210,7 @@ fn relu(out_name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
             let (output_chunks, output_remainder) = data.as_chunks_mut::<8>();
 
             for (input, output) in input_chunks.iter().zip(output_chunks.iter_mut()) {
+                // TODO: Handle NaN/Inf behavior according to ONNX spec
                 let v = _mm256_loadu_ps(input.as_ptr());
                 let result = _mm256_max_ps(v, zero);
                 _mm256_storeu_ps(output.as_mut_ptr(), result);
@@ -227,7 +228,7 @@ fn relu(out_name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
         }
     }
 
-    Ok(Tensor::create(out_name, &x.dims, &data))
+    Tensor::create(out_name, &x.dims, &data)
 }
 
 fn prelu(out_name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
@@ -261,7 +262,7 @@ fn prelu(out_name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
     let rank = x_dims.len();
     let mut data = vec![0f32; x.data.len()];
     if x.data.is_empty() {
-        return Ok(Tensor::create(out_name, &x.dims, &data));
+        return Tensor::create(out_name, &x.dims, &data);
     }
 
     // calculate the number of elements in the last contiguous block
@@ -345,7 +346,7 @@ fn prelu(out_name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
         }
     }
 
-    Ok(Tensor::create(out_name, &x.dims, &data))
+    Tensor::create(out_name, &x.dims, &data)
 }
 
 fn depth_to_space(
@@ -426,15 +427,15 @@ fn depth_to_space(
         }
     }
 
-    Ok(Tensor::create(
+    Tensor::create(
         out_name,
         &[ni as i64, co as i64, oh as i64, ow as i64],
         &data,
-    ))
+    )
 }
 
 // TODO: I dont understand convolution properly, will come back to this later
-// TODO: According to ONNX spec, Conv some more optionally stuffs, which is ignored for now
+// TODO: According to ONNX spec, Conv has some more optionally stuffs, which are ignored for now
 fn conv(
     out_name: &str,
     inputs: &[Option<&Tensor>],
@@ -567,18 +568,31 @@ fn conv(
     }
     let (oh, ow) = (oh_ext / sh as i64 + 1, ow_ext / sw as i64 + 1);
     let (oh, ow) = (oh as usize, ow as usize);
-    let p = oh * ow;
+    let p = oh
+        .checked_mul(ow)
+        .ok_or_else(|| anyhow!("Conv: output dims {oh}*{ow} overflow element count"))?;
 
     // group convolutions
     let m_g = m / group; // output channels per group
     let c_g = cin / group; // input channels per group
     let k_g = c_g * kh * kw; // K per group
 
-    let mut out = vec![0f32; n * m * p];
+    let out_len = n
+        .checked_mul(m)
+        .and_then(|t| t.checked_mul(p))
+        .ok_or_else(|| anyhow!("Conv: output buffer {n}*{m}*{p} overflows"))?;
+    let col_len = k_g
+        .checked_mul(p)
+        .ok_or_else(|| anyhow!("Conv: im2col buffer {k_g}*{p} overflows"))?;
+    let ycm_len = m_g
+        .checked_mul(p)
+        .ok_or_else(|| anyhow!("Conv: gemm buffer {m_g}*{p} overflows"))?;
+
+    let mut out = vec![0f32; out_len];
 
     // We reuse a single im2col buffer for all groups (max K per group = k_g <= k_total)
-    let mut col = vec![0f32; k_g * p]; // [K_g, P] column-major
-    let mut ycm = vec![0f32; m_g * p]; // [M_g, P] column-major
+    let mut col = vec![0f32; col_len]; // [K_g, P] column-major
+    let mut ycm = vec![0f32; ycm_len]; // [M_g, P] column-major
 
     for ni in 0..n {
         let xbase_n = ni * cin * hi * wi;
@@ -652,11 +666,7 @@ fn conv(
         }
     }
 
-    Ok(Tensor::create(
-        out_name,
-        &[n as i64, m as i64, oh as i64, ow as i64],
-        &out,
-    ))
+    Tensor::create(out_name, &[n as i64, m as i64, oh as i64, ow as i64], &out)
 }
 
 fn add(out_name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
@@ -707,7 +717,10 @@ fn add(out_name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
         out_dims.push(od);
     }
 
-    let total: usize = out_dims.iter().map(|&d| d as usize).product();
+    let total: usize = out_dims
+        .iter()
+        .try_fold(1usize, |a, &d| a.checked_mul(d as usize))
+        .ok_or_else(|| anyhow!("Add: output dims {out_dims:?} overflow element count"))?;
     let mut data = vec![0f32; total];
 
     let mut coords = vec![0usize; rank];
@@ -728,5 +741,5 @@ fn add(out_name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
         }
     }
 
-    Ok(Tensor::create(out_name, &out_dims, &data))
+    Tensor::create(out_name, &out_dims, &data)
 }
