@@ -16,6 +16,7 @@ pub enum AttributesDataValue {
 }
 
 impl AttributesDataKind {
+    #[inline]
     fn metadata(&self) -> (&'static str, i32, &'static str) {
         match self {
             AttributesDataKind::F32 => ("f32", 1, "FLOAT"),
@@ -24,20 +25,19 @@ impl AttributesDataKind {
             AttributesDataKind::Ints => ("i64 list", 7, "INTS"),
         }
     }
-
-    #[inline(always)]
+    #[inline]
     pub fn name(self) -> &'static str {
         self.metadata().0
     }
-    #[inline(always)]
+    #[inline]
     pub fn proto_code(&self) -> i32 {
         self.metadata().1
     }
-    #[inline(always)]
+    #[inline]
     pub fn proto_name(&self) -> &'static str {
         self.metadata().2
     }
-    #[inline(always)]
+    #[inline]
     pub fn proto_name_from_proto_code(code: i32) -> Option<&'static str> {
         match code {
             1 => Some("FLOAT"),

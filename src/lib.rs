@@ -214,7 +214,7 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
         // if this creating bad cases to handle, I will lose my shit
         if numel == 0 {
             defined.insert(tensor.name.clone());
-            initializers.push(Tensor::create(&tensor.name, tensor.dims.clone(), vec![]));
+            initializers.push(Tensor::create(&tensor.name, &tensor.dims, &[]));
             continue;
         }
 
@@ -266,11 +266,7 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
                     tensor.raw_data.len()
                 ));
             }
-            Tensor::create(
-                &tensor.name,
-                tensor.dims.clone(),
-                raw_as_f32(&tensor.raw_data),
-            )
+            Tensor::create(&tensor.name, &tensor.dims, &raw_as_f32(&tensor.raw_data))
         } else {
             if tensor.float_data.len() as u64 != numel {
                 return Err(anyhow!(
@@ -279,7 +275,7 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
                     tensor.float_data.len()
                 ));
             }
-            Tensor::create(&tensor.name, tensor.dims.clone(), tensor.float_data.clone())
+            Tensor::create(&tensor.name, &tensor.dims, &tensor.float_data)
         };
 
         defined.insert(tensor.name.to_string());
@@ -300,7 +296,7 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
             }
             continue;
         }
-        let value = read_declared_value(vi, "graph input")?;
+        let value = read_tensor_spec(vi, "graph input")?;
         if !defined.insert(value.name.to_string()) {
             return Err(anyhow!("graph input '{}': duplicate name", vi.name));
         }
@@ -313,7 +309,7 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
         if vo.name.is_empty() {
             return Err(anyhow!("graph output has no name"));
         }
-        let value = read_declared_value(vo, "graph output")?;
+        let value = read_tensor_spec(vo, "graph output")?;
         outputs.push(value);
     }
 
@@ -321,7 +317,7 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
     let mut nodes: Vec<Node> = Vec::with_capacity(graph.node.len());
     for (i, np) in graph.node.iter().enumerate() {
         let label = if np.name.is_empty() {
-            // dont error on empty name,
+            // don't error on empty name,
             // hope it's just a placeholder, not some weird case i need to handle
             format!("node#{i}")
         } else {
@@ -470,9 +466,13 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
 }
 
 #[inline]
-fn read_declared_value(vi: &ValueInfoProto, field: &str) -> Result<TensorSpec> {
-    let name = vi.name.as_str();
-    let Some(tt) = vi.type_.as_ref().and_then(|t| t.tensor_type.as_ref()) else {
+fn read_tensor_spec(value_proto: &ValueInfoProto, field: &str) -> Result<TensorSpec> {
+    let name = value_proto.name.as_str();
+    let Some(tt) = value_proto
+        .type_
+        .as_ref()
+        .and_then(|t| t.tensor_type.as_ref())
+    else {
         return Err(anyhow!("{field} '{name}': no tensor type declared"));
     };
     if tt.elem_type != 1 {

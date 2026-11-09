@@ -15,7 +15,7 @@ pub struct TensorSpec {
 }
 
 impl Tensor {
-    pub fn create(name: &str, dims: Vec<i64>, data: Vec<f32>) -> Self {
+    pub fn create(name: &str, dims: &[i64], data: &[f32]) -> Self {
         assert_eq!(
             dims.iter().product::<i64>() as usize,
             data.len(),

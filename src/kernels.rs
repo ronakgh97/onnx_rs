@@ -163,7 +163,7 @@ fn clip(out_name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
     if let (Some(lo), Some(hi)) = (min, max)
         && lo > hi
     {
-        return Ok(Tensor::create(out_name, x.dims.to_vec(), vec![hi; x.len()]));
+        return Ok(Tensor::create(out_name, &x.dims, &vec![hi; x.len()]));
     }
 
     // basically do this cmp::min(max, cmp::max(min, x))
@@ -190,7 +190,7 @@ fn clip(out_name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
         }
     }
 
-    Ok(Tensor::create(out_name, x.dims.to_vec(), out_data))
+    Ok(Tensor::create(out_name, &x.dims, &out_data))
 }
 
 fn relu(out_name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
@@ -198,7 +198,7 @@ fn relu(out_name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
 
     let mut data = vec![0f32; x.data.len()];
     if x.data.is_empty() {
-        return Ok(Tensor::create(out_name, x.dims.to_vec(), data));
+        return Ok(Tensor::create(out_name, &x.dims, &data));
     }
 
     if data.len() >= 8 {
@@ -227,7 +227,7 @@ fn relu(out_name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
         }
     }
 
-    Ok(Tensor::create(out_name, x.dims.to_vec(), data))
+    Ok(Tensor::create(out_name, &x.dims, &data))
 }
 
 fn prelu(out_name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
@@ -261,7 +261,7 @@ fn prelu(out_name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
     let rank = x_dims.len();
     let mut data = vec![0f32; x.data.len()];
     if x.data.is_empty() {
-        return Ok(Tensor::create(out_name, x_dims.to_vec(), data));
+        return Ok(Tensor::create(out_name, &x.dims, &data));
     }
 
     // calculate the number of elements in the last contiguous block
@@ -345,7 +345,7 @@ fn prelu(out_name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
         }
     }
 
-    Ok(Tensor::create(out_name, x_dims.to_vec(), data))
+    Ok(Tensor::create(out_name, &x.dims, &data))
 }
 
 fn depth_to_space(
@@ -428,8 +428,8 @@ fn depth_to_space(
 
     Ok(Tensor::create(
         out_name,
-        vec![ni as i64, co as i64, oh as i64, ow as i64],
-        data,
+        &[ni as i64, co as i64, oh as i64, ow as i64],
+        &data,
     ))
 }
 
@@ -654,8 +654,8 @@ fn conv(
 
     Ok(Tensor::create(
         out_name,
-        vec![n as i64, m as i64, oh as i64, ow as i64],
-        out,
+        &[n as i64, m as i64, oh as i64, ow as i64],
+        &out,
     ))
 }
 
@@ -698,10 +698,10 @@ fn add(out_name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
         };
 
         if k >= x_pad && xd != 1 {
-            bx_strides[k] = x_strides[k - x_pad] as usize;
+            bx_strides[k] = x_strides[k - x_pad];
         }
         if k >= y_pad && yd != 1 {
-            by_strides[k] = y_strides[k - y_pad] as usize;
+            by_strides[k] = y_strides[k - y_pad];
         }
 
         out_dims.push(od);
@@ -728,5 +728,5 @@ fn add(out_name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
         }
     }
 
-    Ok(Tensor::create(out_name, out_dims, data))
+    Ok(Tensor::create(out_name, &out_dims, &data))
 }
