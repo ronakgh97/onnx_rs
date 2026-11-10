@@ -1,20 +1,12 @@
 //! Onnx operator specifications and attributes
 use anyhow::anyhow;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub enum AttributesDataKind {
     F32,
     I64,
     Str,
     Ints,
-}
-
-#[derive(Clone, Debug)]
-pub enum AttributesDataValue {
-    F32(f32),
-    I64(i64),
-    Str(String),
-    Ints(Vec<i64>),
 }
 
 impl AttributesDataKind {
@@ -28,19 +20,19 @@ impl AttributesDataKind {
         }
     }
     #[inline]
-    pub fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         self.metadata().0
     }
     #[inline]
-    pub fn proto_code(&self) -> i32 {
+    pub(crate) fn proto_code(&self) -> i32 {
         self.metadata().1
     }
     #[inline]
-    pub fn proto_name(&self) -> &'static str {
+    pub(crate) fn proto_name(&self) -> &'static str {
         self.metadata().2
     }
     #[inline]
-    pub fn proto_name_from_proto_code(code: i32) -> Option<&'static str> {
+    pub(crate) fn proto_name_from_proto_code(code: i32) -> Option<&'static str> {
         match code {
             1 => Some("FLOAT"),
             2 => Some("INT"),
@@ -49,6 +41,14 @@ impl AttributesDataKind {
             _ => None,
         }
     }
+}
+
+#[derive(Clone, Debug)]
+pub enum AttributesDataValue {
+    F32(f32),
+    I64(i64),
+    Str(String),
+    Ints(Vec<i64>),
 }
 
 #[allow(unused)]
@@ -157,7 +157,7 @@ pub fn take_four_attr_int(
 }
 
 #[rustfmt::skip]
-#[derive(Clone, Copy, PartialEq, Eq, Debug, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Operator {
     Clip, Relu, PRelu,  DepthToSpace,
     Conv, Gemm, MatMul, MaxPool,
@@ -166,15 +166,26 @@ pub enum Operator {
 
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct OperatorSpec {
     pub min_opset: i64,
-    pub arity_in: (usize, usize),
-    pub arity_out: (usize, usize),
+    pub arity_in: (usize, usize),  // (min..max)
+    pub arity_out: (usize, usize), // (min..max)
     pub attrs: &'static [(&'static str, AttributesDataKind)],
 }
 
 impl Operator {
+    #[inline(always)]
+    #[rustfmt::skip]
+    pub fn static_str(self) -> &'static str {
+        match self {
+            Operator::Clip => "Clip", Operator::Relu => "Relu", Operator::PRelu => "PRelu", Operator::DepthToSpace => "DepthToSpace",
+            Operator::Conv => "Conv", Operator::Gemm => "Gemm", Operator::MatMul => "MatMul", Operator::MaxPool => "MaxPool",
+            Operator::AveragePool => "AveragePool", Operator::Sigmoid => "Sigmoid", Operator::Flatten => "Flatten", Operator::Transpose => "Transpose",
+            Operator::Softmax => "Softmax", Operator::Add => "Add", Operator::Sub => "Sub", Operator::Mul => "Mul", Operator::Div => "Div",
+        }
+    }
+
     #[inline(always)]
     #[rustfmt::skip]
     pub fn lookup(name: &str) -> Option<Operator> {
@@ -186,17 +197,6 @@ impl Operator {
             _ => return None,
         };
         Some(op)
-    }
-
-    #[inline(always)]
-    #[rustfmt::skip]
-    pub fn static_name(self) -> &'static str {
-        match self {
-            Operator::Clip => "Clip", Operator::Relu => "Relu", Operator::PRelu => "PRelu", Operator::DepthToSpace => "DepthToSpace",
-            Operator::Conv => "Conv", Operator::Gemm => "Gemm", Operator::MatMul => "MatMul", Operator::MaxPool => "MaxPool",
-            Operator::AveragePool => "AveragePool", Operator::Sigmoid => "Sigmoid", Operator::Flatten => "Flatten", Operator::Transpose => "Transpose",
-            Operator::Softmax => "Softmax", Operator::Add => "Add", Operator::Sub => "Sub", Operator::Mul => "Mul", Operator::Div => "Div",
-        }
     }
 
     #[inline(always)]

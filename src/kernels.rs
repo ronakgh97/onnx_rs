@@ -12,29 +12,30 @@ use std::arch::x86_64::{
 };
 
 impl Operator {
+    /// Compute the output tensor for this operator, given the input tensors and attributes
     #[inline(always)]
     pub fn compute(
         self,
-        out_name: &str,
+        output_name: &str,
         inputs: &[Option<&Tensor>],
         attrs: &[(String, AttributesDataValue)],
     ) -> Result<Tensor> {
         match self {
-            Operator::Clip => clip(out_name, inputs),
-            Operator::Relu => relu(out_name, inputs),
-            Operator::PRelu => prelu(out_name, inputs),
-            Operator::DepthToSpace => depth_to_space(out_name, inputs, attrs),
-            Operator::Conv => conv(out_name, inputs, attrs),
-            Operator::Add => add(out_name, inputs),
+            Operator::Clip => clip(output_name, inputs),
+            Operator::Relu => relu(output_name, inputs),
+            Operator::PRelu => prelu(output_name, inputs),
+            Operator::DepthToSpace => depth_to_space(output_name, inputs, attrs),
+            Operator::Conv => conv(output_name, inputs, attrs),
+            Operator::Add => add(output_name, inputs),
             _ => Err(anyhow!(
-                "operator '{}' has no kernel implemented yet",
-                self.static_name()
+                "operator '{:?}' has no kernel implemented yet",
+                self
             )),
         }
     }
 }
 
-fn clip(out_name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
+fn clip(name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
     let x = take_tensor(inputs, 0, "Clip")?;
     let min = if let Some(t) = inputs.get(1).copied().flatten() {
         if t.data.len() != 1 {
@@ -63,7 +64,7 @@ fn clip(out_name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
     if let (Some(lo), Some(hi)) = (min, max)
         && lo > hi
     {
-        return Tensor::create(out_name, &x.dims, &vec![hi; x.len()]);
+        return Tensor::create(name, &x.dims, &vec![hi; x.len()]);
     }
 
     // basically do this cmp::min(max, cmp::max(min, x))
@@ -90,15 +91,15 @@ fn clip(out_name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
         }
     }
 
-    Tensor::create(out_name, &x.dims, &out_data)
+    Tensor::create(name, &x.dims, &out_data)
 }
 
-fn relu(out_name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
+fn relu(name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
     let x = take_tensor(inputs, 0, "Relu")?;
 
     let mut data = vec![0f32; x.data.len()];
     if x.data.is_empty() {
-        return Tensor::create(out_name, &x.dims, &data);
+        return Tensor::create(name, &x.dims, &data);
     }
 
     if data.len() >= 8 {
@@ -128,10 +129,10 @@ fn relu(out_name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
         }
     }
 
-    Tensor::create(out_name, &x.dims, &data)
+    Tensor::create(name, &x.dims, &data)
 }
 
-fn prelu(out_name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
+fn prelu(name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
     let x = take_tensor(inputs, 0, "PRelu")?;
     let slope = take_tensor(inputs, 1, "PRelu")?;
     let x_dims = &x.dims;
@@ -162,7 +163,7 @@ fn prelu(out_name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
     let rank = x_dims.len();
     let mut data = vec![0f32; x.data.len()];
     if x.data.is_empty() {
-        return Tensor::create(out_name, &x.dims, &data);
+        return Tensor::create(name, &x.dims, &data);
     }
 
     // calculate the number of elements in the last contiguous block
@@ -246,11 +247,11 @@ fn prelu(out_name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
         }
     }
 
-    Tensor::create(out_name, &x.dims, &data)
+    Tensor::create(name, &x.dims, &data)
 }
 
 fn depth_to_space(
-    out_name: &str,
+    name: &str,
     inputs: &[Option<&Tensor>],
     attrs: &[(String, AttributesDataValue)],
 ) -> Result<Tensor> {
@@ -327,17 +328,13 @@ fn depth_to_space(
         }
     }
 
-    Tensor::create(
-        out_name,
-        &[ni as i64, co as i64, oh as i64, ow as i64],
-        &data,
-    )
+    Tensor::create(name, &[ni as i64, co as i64, oh as i64, ow as i64], &data)
 }
 
 // TODO: I dont understand convolution properly, will come back to this later
 // TODO: According to ONNX spec, Conv has some more optionally stuffs, which are ignored for now
 fn conv(
-    out_name: &str,
+    name: &str,
     inputs: &[Option<&Tensor>],
     attrs: &[(String, AttributesDataValue)],
 ) -> Result<Tensor> {
@@ -566,10 +563,10 @@ fn conv(
         }
     }
 
-    Tensor::create(out_name, &[n as i64, m as i64, oh as i64, ow as i64], &out)
+    Tensor::create(name, &[n as i64, m as i64, oh as i64, ow as i64], &out)
 }
 
-fn add(out_name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
+fn add(name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
     let x = take_tensor(inputs, 0, "Add")?;
     let y = take_tensor(inputs, 1, "Add")?;
 
@@ -641,5 +638,5 @@ fn add(out_name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
         }
     }
 
-    Tensor::create(out_name, &out_dims, &data)
+    Tensor::create(name, &out_dims, &data)
 }

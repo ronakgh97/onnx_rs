@@ -3,15 +3,20 @@ mod ops;
 mod proto;
 mod tensor;
 
-pub use crate::ops::{AttributesDataKind, AttributesDataValue, Operator};
-use crate::proto::{ModelProto, ValueInfoProto};
+// public exports
+pub use crate::ops::{AttributesDataValue, Operator, OperatorSpec};
 pub use crate::tensor::{Tensor, TensorSpec};
+
+use crate::ops::AttributesDataKind;
+use crate::proto::{ModelProto, ValueInfoProto};
 use anyhow::{Result, anyhow};
 use prost::Message;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
+/// Represents a Node in the ONNX graph,
+/// which is an operator with its inputs, outputs, and attributes
 #[derive(Clone, Debug)]
 pub struct Node {
     pub op: Operator,
@@ -21,23 +26,27 @@ pub struct Node {
     pub attrs: Vec<(String, AttributesDataValue)>,
 }
 
+/// Represents an ONNX model, which is a directed acyclic graph of nodes (operators)
 #[derive(Clone, Debug)]
 pub struct Model {
-    pub ir_version: i64,
-    pub opset: i64,
-    pub inputs: Vec<TensorSpec>,
-    pub outputs: Vec<TensorSpec>,
-    pub initializers: Vec<Tensor>,
-    pub nodes: Vec<Node>,
+    ir_version: i64,
+    opset: i64,
+    initializers: Vec<Tensor>,
+    nodes: Vec<Node>,
+    inputs: Vec<TensorSpec>,
+    outputs: Vec<TensorSpec>,
 }
 
 impl Model {
+    /// Create runnable model from slice of bytes
     pub fn from_bytes(bytes: &Arc<[u8]>) -> Result<Self> {
         decode_model(bytes)
     }
+    /// Create runnable model from .onnx file path
     pub fn from_file(path: impl AsRef<Path>) -> Result<Self> {
         decode_model(&std::fs::read(path)?)
     }
+    /// Run 1-input/1-output graph with the given input tensor, returning the output tensor
     pub fn run_single(&self, data: &Tensor) -> Result<Tensor> {
         if self.inputs.len() != 1 || self.outputs.len() != 1 {
             return Err(anyhow!(
@@ -46,11 +55,12 @@ impl Model {
                 self.outputs.len()
             ));
         }
-        let mut feed: HashMap<String, Tensor> = HashMap::default();
+        let mut feed: HashMap<String, Tensor> = HashMap::with_capacity(64);
         feed.insert(self.inputs[0].name.to_string(), data.clone());
         let mut out = self.run(&feed)?;
         Ok(out.remove(0))
     }
+    /// Run graph with the given feed of input tensors, returning the output tensors
     pub fn run(&self, feed: &HashMap<String, Tensor>) -> Result<Vec<Tensor>> {
         // validate feed, every declared input is provided, and no extra inputs are given
         for spec in &self.inputs {
@@ -73,7 +83,7 @@ impl Model {
         }
 
         // build scope, initializers + feed
-        let mut scope: HashMap<&str, Tensor> = HashMap::default();
+        let mut scope: HashMap<&str, Tensor> = HashMap::with_capacity(64);
         for t in &self.initializers {
             scope.insert(t.name.as_ref(), t.clone());
         }
@@ -120,6 +130,27 @@ impl Model {
         }
         Ok(produced)
     }
+    /// Get the IR version of the model
+    pub fn ir_version(&self) -> i64 {
+        self.ir_version
+    }
+    /// Get the opset of the model
+    pub fn opset(&self) -> i64 {
+        self.opset
+    }
+    /// Get the initializers of the model
+    pub fn initializers(&self) -> &[Tensor] {
+        &self.initializers
+    }
+    /// Get the inputs and outputs of the model
+    pub fn inputs_outputs(&self) -> (&[TensorSpec], &[TensorSpec]) {
+        (&self.inputs, &self.outputs)
+    }
+    /// Get all the nodes in the model graph
+    pub fn nodes(&self) -> &[Node] {
+        &self.nodes
+    }
+    /// Get the operators used in the model
     pub fn operators(&self) -> Vec<Operator> {
         let mut ops: Vec<Operator> = self.nodes.iter().map(|n| n.op).collect();
         ops.sort_unstable();
@@ -179,10 +210,10 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
         return Err(anyhow!("graph missing from model"));
     };
 
-    let mut defined: HashSet<String> = HashSet::default();
-    let mut producers: HashMap<String, usize> = HashMap::default();
+    let mut defined: HashSet<String> = HashSet::with_capacity(64);
+    let mut producers: HashMap<String, usize> = HashMap::with_capacity(64);
 
-    let mut init_names: HashSet<String> = HashSet::default();
+    let mut init_names: HashSet<String> = HashSet::with_capacity(64);
     let mut initializers: Vec<Tensor> = Vec::with_capacity(graph.initializer.len());
     for (i, tensor) in graph.initializer.iter().enumerate() {
         if tensor.name.is_empty() {
@@ -322,7 +353,7 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
     for (i, np) in graph.node.iter().enumerate() {
         let label = if np.name.is_empty() {
             // don't error on empty name,
-            // hope it's just a placeholder, not some weird case i need to handle
+            // hope it's just a placeholder, not some weird case I need to handle
             format!("node#{i}")
         } else {
             np.name.clone()
@@ -338,14 +369,14 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
         if opset < spec.min_opset {
             return Err(anyhow!(
                 "{label}: '{}' needs opset ≥ {}, model declares {opset}",
-                op.static_name(),
+                op.static_str(),
                 spec.min_opset
             ));
         }
         if np.input.len() < spec.arity_in.0 || np.input.len() > spec.arity_in.1 {
             return Err(anyhow!(
-                "{label}: '{}' wants {}..{} inputs, got {}",
-                op.static_name(),
+                "{label}: '{}' wants min={}..max={} inputs, got {}",
+                op.static_str(),
                 spec.arity_in.0,
                 spec.arity_in.1,
                 np.input.len()
@@ -353,8 +384,8 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
         }
         if np.output.len() < spec.arity_out.0 || np.output.len() > spec.arity_out.1 {
             return Err(anyhow!(
-                "{label}: '{}' wants {}..{} outputs, got {}",
-                op.static_name(),
+                "{label}: '{}' wants min={}..max={} outputs, got {}",
+                op.static_str(),
                 spec.arity_out.0,
                 spec.arity_out.1,
                 np.output.len()
@@ -362,13 +393,13 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
         }
 
         // validate & collect node attributes
-        let mut attrs: Vec<(String, AttributesDataValue)> = vec![];
+        let mut attrs: Vec<(String, AttributesDataValue)> = Vec::with_capacity(np.output.len());
         for a in &np.attribute {
             let Some(&(name, kind)) = spec.attrs.iter().find(|(n, _)| *n == a.name.as_str()) else {
                 return Err(anyhow!(
                     "{label}: attribute '{}' unknown for '{}'",
                     a.name,
-                    op.static_name()
+                    op.static_str()
                 ));
             };
 
