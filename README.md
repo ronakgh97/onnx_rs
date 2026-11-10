@@ -4,9 +4,9 @@ Notes:
 
 - Runtime is very constrained, only few type of models and certain runtime behaviors are supported (thanks to onnx spec
   for making harder)
-- Model parser is quite weak and complex to implement and needs to have a reasonably simple graph (send PR or help me)
-- Nothing is assumed, anything "alien" to this runtime's scope is rejected and panics instead of silently ignoring or assuming,
-  which may lead to bad undesired outputs
+- Model parser is quite weak and complex to implement and needs to have a reasonably simple graph
+- Nothing is assumed, anything "alien" to this runtime's scope is rejected and panics instead of silently ignoring or
+  assuming, which may lead to bad undesired outputs
 - Operators correctness tests are covered yet, so expect some undesired behaviors/outputs on sophisticated operators
   used by the model
 

@@ -3,11 +3,11 @@ mod ops;
 mod proto;
 mod tensor;
 
-// public exports
-pub use crate::ops::{AttributesDataValue, Operator, OperatorSpec};
+// public only get tensor utils and model runner, no abstraction leaking
 pub use crate::tensor::{Tensor, TensorSpec};
 
 use crate::ops::AttributesDataKind;
+use crate::ops::{AttributesDataValue, Operator};
 use crate::proto::{ModelProto, ValueInfoProto};
 use anyhow::{Result, anyhow};
 use prost::Message;
@@ -17,24 +17,38 @@ use std::sync::Arc;
 
 /// Represents a Node in the ONNX graph,
 /// which is an operator with its inputs, outputs, and attributes
-#[derive(Clone, Debug)]
 pub struct Node {
-    pub op: Operator,
-    pub name: String,
-    pub inputs: Vec<String>,
-    pub outputs: Vec<String>,
-    pub attrs: Vec<(String, AttributesDataValue)>,
+    name: String,                              // node_name
+    op: Operator,                              // operator_type
+    inputs: Vec<String>,                       // multiple_inputs
+    outputs: Vec<String>,                      // multiple_outputs
+    attrs: Vec<(String, AttributesDataValue)>, // list of (attribute_name, attribute_value) associated
+}
+
+impl Node {
+    /// Name of the node
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    /// Operation type of the node, e.g., "Conv", "Relu", etc.
+    pub fn op(&self) -> &'static str {
+        self.op.static_str()
+    }
+    /// Inputs and outputs of the node
+    pub fn inputs_outputs(&self) -> (&[String], &[String]) {
+        (&self.inputs, &self.outputs)
+    }
 }
 
 /// Represents an ONNX model, which is a directed acyclic graph of nodes (operators)
-#[derive(Clone, Debug)]
 pub struct Model {
-    ir_version: i64,
-    opset: i64,
-    initializers: Vec<Tensor>,
-    nodes: Vec<Node>,
-    inputs: Vec<TensorSpec>,
-    outputs: Vec<TensorSpec>,
+    ir_version: i64,           // for version check
+    opset: i64,                // for compatibility check
+    nodes: Vec<Node>,          // all nodes in the graph, in topological order
+    initializers: Vec<Tensor>, // weights and biases
+    inputs: Vec<TensorSpec>,   // all the inputs that the graph expects, with their names and shapes
+    outputs: Vec<TensorSpec>, // all the outputs that the graph produces, with their names and shapes
+    operators: Vec<String>,   // all the operators used in the graph, in topological order (deduped)
 }
 
 impl Model {
@@ -105,12 +119,24 @@ impl Model {
                     .ok_or_else(|| anyhow!("{}: input '{}' is not in scope", node.name, name))?;
                 slots.push(Some(t));
             }
-            // TODO; some ops have multiple outputs, need to handle them
-            let Some(oname) = node.outputs.first() else {
+            // multiple outputs are allowed, but at least one output must be declared
+            let output_declared: Vec<&str> = node.outputs.iter().map(|s| s.as_str()).collect();
+            if output_declared.is_empty() {
                 return Err(anyhow!("{}: node has zero outputs", node.name));
-            };
-            let out = node.op.compute(oname.as_str(), &slots, &node.attrs)?;
-            scope.insert(oname.as_str(), out);
+            }
+            let output_tensor = node.op.compute(&output_declared, &slots, &node.attrs)?;
+            if output_tensor.len() != output_declared.len() {
+                return Err(anyhow!(
+                    "{}: operator '{:?}' produced {} outputs, declared {}",
+                    node.name,
+                    node.op,
+                    output_tensor.len(),
+                    output_declared.len()
+                ));
+            }
+            for (name, out) in output_declared.iter().zip(output_tensor) {
+                scope.insert(name, out);
+            }
         }
 
         // graph is done, collect outputs from scope
@@ -152,11 +178,8 @@ impl Model {
         &self.nodes
     }
     /// Get the operators used in the model
-    pub fn operators(&self) -> Vec<Operator> {
-        let mut ops: Vec<Operator> = self.nodes.iter().map(|n| n.op).collect();
-        ops.sort_unstable();
-        ops.dedup();
-        ops
+    pub fn operators(&self) -> &[String] {
+        &self.operators
     }
 }
 
@@ -354,8 +377,10 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
     for (i, np) in graph.node.iter().enumerate() {
         let label = if np.name.is_empty() {
             // don't error on empty name,
-            // hope it's just a placeholder, not some weird case I need to handle
-            format!("node#{i}")
+            // TODO: hope it's just a placeholder, not some weird case I need to handle
+            // screw it, I am not allowing this
+            // format!("node#{i}")
+            return Err(anyhow!("node#{i} has no name"));
         } else {
             np.name.clone()
         };
@@ -405,15 +430,17 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
             };
 
             // validate attribute type
-            let got = a
-                .type_
-                .and_then(AttributesDataKind::proto_name_from_proto_code);
-            let expected_type = kind.proto_code();
+            let got_type = a.type_;
+            let expected_type = kind as i32;
             if a.type_ != Some(expected_type) {
                 return Err(anyhow!(
-                    "{label}: attribute '{name}' expects type {}, got {:?}",
-                    kind.proto_name(),
-                    got
+                    "{label}: attribute '{name}' expects type {}, got {}",
+                    atype(expected_type),
+                    if let Some(t) = got_type {
+                        atype(t)
+                    } else {
+                        "none"
+                    }
                 ));
             }
 
@@ -430,9 +457,8 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
                 (AttributesDataKind::Ints, _, _, _, _) => AttributesDataValue::Ints(a.ints.clone()),
                 _ => {
                     return Err(anyhow!(
-                        "{label}: attribute '{}' does not carry a {} payload",
+                        "{label}: attribute '{}' does not carry payload",
                         a.name,
-                        kind.name()
                     ));
                 }
             };
@@ -491,13 +517,21 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
         }
     }
 
+    let mut operators: Vec<String> = nodes
+        .iter()
+        .map(|n| n.op.static_str().to_string())
+        .collect();
+    operators.sort_unstable();
+    operators.dedup();
+
     Ok(Model {
         ir_version,
         opset,
+        nodes,
+        initializers,
         inputs,
         outputs,
-        initializers,
-        nodes,
+        operators,
     })
 }
 
@@ -553,6 +587,8 @@ fn read_tensor_spec(value_proto: &ValueInfoProto, field: &str) -> Result<TensorS
 #[inline]
 fn dtype_name(proto_code: i32) -> &'static str {
     match proto_code {
+        0 => "undefined",
+        1 => "float32",
         2 => "uint8",
         3 => "int8",
         4 => "uint16",
@@ -568,6 +604,19 @@ fn dtype_name(proto_code: i32) -> &'static str {
         14 => "complex64",
         15 => "complex128",
         16 => "bfloat16",
+        _ => "unknown",
+    }
+}
+
+#[inline]
+fn atype(proto_code: i32) -> &'static str {
+    match proto_code {
+        1 => "f32",
+        2 => "i64",
+        3 => "string",
+        6 => "floats", // not used, just placeholder
+        7 => "ints",
+        8 => "strings", // not used, just placeholder
         _ => "unknown",
     }
 }
