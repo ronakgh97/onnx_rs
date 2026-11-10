@@ -345,22 +345,29 @@ fn conv(
     // handle attributes: auto_pad, group, strides, dilations, pads, kernel_shape
 
     let valid_auto = ["NOTSET", "SAME_UPPER", "SAME_LOWER", "VALID"];
-    let auto_pad = take_attr_str(attrs, "auto_pad")?.unwrap_or("NOTSET");
-    if !valid_auto.contains(&auto_pad) {
-        return Err(anyhow!(
-            "Conv: auto_pad must be one of {valid_auto:?}, got '{auto_pad}'"
-        ));
-    }
+    let auto_pad = match take_attr_str(attrs, "auto_pad")? {
+        Some(ap) if !valid_auto.contains(&ap) => {
+            return Err(anyhow!(
+                "Conv: auto_pad must be one of {valid_auto:?}, got '{ap}'"
+            ));
+        }
+        _ => "NOTSET",
+    };
+
     if auto_pad != "NOTSET" && take_attr_ints(attrs, "pads")?.is_some() {
         return Err(anyhow!(
             "Conv: 'pads' attribute cannot be used with auto_pad '{auto_pad}'"
         ));
     }
 
-    let group = take_attr_i64(attrs, "group")?.copied().unwrap_or(1) as usize;
-    if group == 0 {
-        return Err(anyhow!("Conv: group must be >= 1"));
-    }
+    let group = match take_attr_i64(attrs, "group")?.copied() {
+        Some(g) if g < 1 => {
+            return Err(anyhow!("Conv: group must be >= 1, got {g}"));
+        }
+        Some(g) => g,
+        None => 1,
+    };
+    let group = group as usize;
 
     let [sh, sw] = take_two_attr_int(attrs, "strides", [1, 1])?;
     let [dh, dw] = take_two_attr_int(attrs, "dilations", [1, 1])?;

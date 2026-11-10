@@ -105,6 +105,7 @@ impl Model {
                     .ok_or_else(|| anyhow!("{}: input '{}' is not in scope", node.name, name))?;
                 slots.push(Some(t));
             }
+            // TODO; some ops have multiple outputs, need to handle them
             let Some(oname) = node.outputs.first() else {
                 return Err(anyhow!("{}: node has zero outputs", node.name));
             };
@@ -301,7 +302,7 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
                     tensor.raw_data.len()
                 ));
             }
-            Tensor::create(&tensor.name, &tensor.dims, &raw_as_f32(&tensor.raw_data))?
+            Tensor::create(&tensor.name, &tensor.dims, &bytes_to_f32(&tensor.raw_data)?)?
         } else {
             if tensor.float_data.len() as u64 != numel {
                 return Err(anyhow!(
@@ -510,6 +511,7 @@ fn read_tensor_spec(value_proto: &ValueInfoProto, field: &str) -> Result<TensorS
     else {
         return Err(anyhow!("{field} '{name}': no tensor type declared"));
     };
+    // proto_code for f32 is 1
     if tt.elem_type != 1 {
         return Err(anyhow!(
             "{field} '{name}': {}, only f32 is supported",
@@ -521,9 +523,11 @@ fn read_tensor_spec(value_proto: &ValueInfoProto, field: &str) -> Result<TensorS
             "{field} '{name}': no shape declared, concrete shapes required"
         ));
     };
-    if shape.dim.is_empty() {
-        return Err(anyhow!("{field} '{name}': shape declared, but rank is 0"));
-    }
+    // TODO; handle symbolic dims, for now require concrete shapes
+    // rank-0 tensors are fucking valid
+    // if shape.dim.is_empty() {
+    //     return Err(anyhow!("{field} '{name}': shape declared, but rank is 0"));
+    // }
     let mut dims = Vec::with_capacity(shape.dim.len());
     for (di, d) in shape.dim.iter().enumerate() {
         match &d.dim_value {
@@ -547,8 +551,8 @@ fn read_tensor_spec(value_proto: &ValueInfoProto, field: &str) -> Result<TensorS
 }
 
 #[inline]
-fn dtype_name(code: i32) -> &'static str {
-    match code {
+fn dtype_name(proto_code: i32) -> &'static str {
+    match proto_code {
         2 => "uint8",
         3 => "int8",
         4 => "uint16",
@@ -569,16 +573,21 @@ fn dtype_name(code: i32) -> &'static str {
 }
 
 #[inline]
-fn raw_as_f32(bytes: &[u8]) -> Vec<f32> {
-    let (full_chunks, reminder_chunks) = bytes.as_chunks::<4>();
-    assert!(
-        reminder_chunks.is_empty(),
-        "invalid bytes length: {}",
-        bytes.len()
+fn bytes_to_f32(bytes: &[u8]) -> Result<Vec<f32>> {
+    if !bytes.len().is_multiple_of(4) {
+        return Err(anyhow!(
+            "initializer: raw_data has {} bytes, cannot be converted to f32",
+            bytes.len()
+        ));
+    }
+
+    let (bytes_chunks, _) = bytes.as_chunks::<4>();
+    let mut floats = Vec::with_capacity(bytes_chunks.len());
+    floats.extend(
+        bytes_chunks
+            .iter()
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])),
     );
 
-    full_chunks
-        .iter()
-        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-        .collect()
+    Ok(floats)
 }

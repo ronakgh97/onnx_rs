@@ -58,6 +58,13 @@ impl Tensor {
         }
         strides
     }
+    #[inline]
+    pub fn to_spec(&self) -> TensorSpec {
+        TensorSpec {
+            name: self.name.clone(),
+            dims: self.dims.clone(),
+        }
+    }
 }
 
 #[inline(always)]
