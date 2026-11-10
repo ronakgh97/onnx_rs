@@ -1,4 +1,5 @@
 //! Onnx operator specifications and attributes
+use anyhow::Result;
 use anyhow::anyhow;
 
 #[repr(i32)]
@@ -26,7 +27,7 @@ pub enum AttributesDataValue {
 pub fn take_attr_f32<'s>(
     attrs: &'s [(String, AttributesDataValue)],
     name: &str,
-) -> anyhow::Result<Option<&'s f32>> {
+) -> Result<Option<&'s f32>> {
     for (k, v) in attrs {
         if k == name {
             let AttributesDataValue::F32(v) = v else {
@@ -42,7 +43,7 @@ pub fn take_attr_f32<'s>(
 pub fn take_attr_i64<'s>(
     attrs: &'s [(String, AttributesDataValue)],
     name: &str,
-) -> anyhow::Result<Option<&'s i64>> {
+) -> Result<Option<&'s i64>> {
     for (k, v) in attrs {
         if k == name {
             let AttributesDataValue::I64(v) = v else {
@@ -58,7 +59,7 @@ pub fn take_attr_i64<'s>(
 pub fn take_attr_str<'s>(
     attrs: &'s [(String, AttributesDataValue)],
     name: &str,
-) -> anyhow::Result<Option<&'s str>> {
+) -> Result<Option<&'s str>> {
     for (k, v) in attrs {
         if k == name {
             let AttributesDataValue::Str(s) = v else {
@@ -74,7 +75,7 @@ pub fn take_attr_str<'s>(
 pub fn take_attr_i64s<'s>(
     attrs: &'s [(String, AttributesDataValue)],
     name: &str,
-) -> anyhow::Result<Option<&'s [i64]>> {
+) -> Result<Option<&'s [i64]>> {
     for (k, v) in attrs {
         if k == name {
             let AttributesDataValue::Ints(v) = v else {
@@ -89,10 +90,9 @@ pub fn take_attr_i64s<'s>(
 pub fn take_attr_i64s_n<const N: usize>(
     attrs: &[(String, AttributesDataValue)],
     name: &str,
-    default: [i64; N],
-) -> anyhow::Result<[i64; N]> {
+) -> Result<Option<[i64; N]>> {
     let Some(v) = take_attr_i64s(attrs, name)? else {
-        return Ok(default);
+        return Ok(None);
     };
     if v.len() != N {
         return Err(anyhow!(
@@ -102,7 +102,7 @@ pub fn take_attr_i64s_n<const N: usize>(
     }
     let mut out = [0i64; N];
     out.copy_from_slice(v);
-    Ok(out)
+    Ok(Some(out))
 }
 
 #[rustfmt::skip]

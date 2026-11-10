@@ -17,6 +17,8 @@ use std::sync::Arc;
 
 /// Represents a Node in the ONNX graph,
 /// which is an operator with its inputs, outputs, and attributes
+#[repr(C)]
+#[derive(Clone)]
 pub struct Node {
     name: String,                              // node_name
     op: Operator,                              // operator_type
@@ -41,6 +43,8 @@ impl Node {
 }
 
 /// Represents an ONNX model, which is a directed acyclic graph of nodes (operators)
+#[repr(C)]
+#[derive(Clone)]
 pub struct Model {
     ir_version: i64,           // for version check
     opset: i64,                // for compatibility check
@@ -69,10 +73,69 @@ impl Model {
                 self.outputs.len()
             ));
         }
-        let mut feed: HashMap<String, Tensor> = HashMap::with_capacity(64);
-        feed.insert(self.inputs[0].name.to_string(), data.clone());
-        let mut out = self.run(&feed)?;
-        Ok(out.remove(0))
+        // build scope, initializers + input
+        let mut scope: HashMap<&str, Tensor> =
+            HashMap::with_capacity(self.initializers.len() + 1 + self.nodes.len() * 2);
+        for t in &self.initializers {
+            scope.insert(t.name.as_ref(), t.clone());
+        }
+        scope.insert(self.inputs[0].name.as_ref(), data.clone());
+
+        // walk the graph in topological order
+        let mut output_declared: Vec<&str> = Vec::with_capacity(self.nodes.len() * 2);
+        for node in &self.nodes {
+            // collect inputs first (avoids borrow conflict when inserting outputs)
+            let mut inputs: Vec<Option<&Tensor>> = Vec::with_capacity(node.inputs.len());
+            for name in &node.inputs {
+                if name.is_empty() {
+                    inputs.push(None);
+                    continue;
+                }
+                let t = scope
+                    .get(name.as_str())
+                    .ok_or_else(|| anyhow!("{}: input '{}' is not in scope", node.name, name))?;
+                inputs.push(Some(t));
+            }
+            output_declared.clear(); // reuse buffer
+            for name in &node.outputs {
+                if !name.is_empty() {
+                    output_declared.push(name.as_str());
+                }
+            }
+            if output_declared.is_empty() {
+                return Err(anyhow!("{}: node has zero non-empty outputs", node.name));
+            }
+            let output_tensor = node.op.compute(&output_declared, &inputs, &node.attrs)?;
+            if output_tensor.len() != output_declared.len() {
+                return Err(anyhow!(
+                    "{}: operator '{:?}' produced {} outputs, declared {}",
+                    node.name,
+                    node.op,
+                    output_tensor.len(),
+                    output_declared.len()
+                ));
+            }
+            // bind to scope for next nodes to consume
+            for (name, out) in output_declared.iter().zip(output_tensor) {
+                scope.insert(name, out);
+            }
+        }
+
+        let Some(t) = scope.get(self.outputs[0].name.as_ref()) else {
+            return Err(anyhow!(
+                "output '{}' was never produced",
+                self.outputs[0].name
+            ));
+        };
+        if t.dims != self.outputs[0].dims {
+            return Err(anyhow!(
+                "output '{}': got dims {:?}, graph declares {:?}",
+                self.outputs[0].name,
+                t.dims,
+                self.outputs[0].dims
+            ));
+        }
+        Ok(t.clone())
     }
     /// Run graph with the given feed of input tensors, returning the output tensors
     pub fn run(&self, feed: &HashMap<String, Tensor>) -> Result<Vec<Tensor>> {
@@ -97,7 +160,9 @@ impl Model {
         }
 
         // build scope, initializers + feed
-        let mut scope: HashMap<&str, Tensor> = HashMap::with_capacity(64);
+        // pre-size scope to avoid rehashing; initializers + feed entries
+        let mut scope: HashMap<&str, Tensor> =
+            HashMap::with_capacity(self.initializers.len() + feed.len() + self.nodes.len() * 2);
         for t in &self.initializers {
             scope.insert(t.name.as_ref(), t.clone());
         }
@@ -107,24 +172,32 @@ impl Model {
 
         // walk the graph in topological order,
         // compute each node's output(s) and bind them to scope
+        let mut output_declared: Vec<&str> = Vec::with_capacity(4);
         for node in &self.nodes {
-            let mut slots: Vec<Option<&Tensor>> = Vec::with_capacity(node.inputs.len());
+            // collect inputs first (avoids borrow conflict when inserting outputs)
+            let mut inputs: Vec<Option<&Tensor>> = Vec::with_capacity(node.inputs.len());
             for name in &node.inputs {
                 if name.is_empty() {
-                    slots.push(None);
+                    inputs.push(None);
                     continue;
                 }
                 let t = scope
                     .get(name.as_str())
                     .ok_or_else(|| anyhow!("{}: input '{}' is not in scope", node.name, name))?;
-                slots.push(Some(t));
+                inputs.push(Some(t));
             }
-            // multiple outputs are allowed, but at least one output must be declared
-            let output_declared: Vec<&str> = node.outputs.iter().map(|s| s.as_str()).collect();
+            output_declared.clear(); // reuse buffer
+
+            // fill in output_declared with non-empty output names
+            for name in &node.outputs {
+                if !name.is_empty() {
+                    output_declared.push(name.as_str());
+                }
+            }
             if output_declared.is_empty() {
-                return Err(anyhow!("{}: node has zero outputs", node.name));
+                return Err(anyhow!("{}: node has zero non-empty outputs", node.name));
             }
-            let output_tensor = node.op.compute(&output_declared, &slots, &node.attrs)?;
+            let output_tensor = node.op.compute(&output_declared, &inputs, &node.attrs)?;
             if output_tensor.len() != output_declared.len() {
                 return Err(anyhow!(
                     "{}: operator '{:?}' produced {} outputs, declared {}",
@@ -134,6 +207,7 @@ impl Model {
                     output_declared.len()
                 ));
             }
+            // bind outputs to scope for next nodes to consume
             for (name, out) in output_declared.iter().zip(output_tensor) {
                 scope.insert(name, out);
             }
@@ -364,9 +438,13 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
 
     // validate & collect graph outputs
     let mut outputs: Vec<TensorSpec> = Vec::with_capacity(graph.output.len());
+    let mut output_names: HashSet<String> = HashSet::with_capacity(graph.output.len());
     for vo in &graph.output {
         if vo.name.is_empty() {
             return Err(anyhow!("graph output has no name"));
+        }
+        if !output_names.insert(vo.name.clone()) {
+            return Err(anyhow!("graph output '{}': duplicate name", vo.name));
         }
         let value = read_tensor_spec(vo, "graph output")?;
         outputs.push(value);
@@ -417,9 +495,20 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
                 np.output.len()
             ));
         }
+        // required outputs (first arity_out.0) must be non-empty
+        // this is decoding time validation, compute() can peacefully run with strict non-empty outputs
+        for (idx, oname) in np.output.iter().enumerate() {
+            if idx < spec.arity_out.0 && oname.is_empty() {
+                return Err(anyhow!(
+                    "{label}: '{}' required output #{} has empty name",
+                    op.static_str(),
+                    idx
+                ));
+            }
+        }
 
         // validate & collect node attributes
-        let mut attrs: Vec<(String, AttributesDataValue)> = Vec::with_capacity(np.output.len());
+        let mut attrs: Vec<(String, AttributesDataValue)> = Vec::with_capacity(np.attribute.len());
         for a in &np.attribute {
             let Some(&(name, kind)) = spec.attrs.iter().find(|(n, _)| *n == a.name.as_str()) else {
                 return Err(anyhow!(

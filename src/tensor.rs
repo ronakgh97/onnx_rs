@@ -3,7 +3,7 @@ use anyhow::{Result, anyhow};
 use std::sync::Arc;
 
 /// Tensor of f32 values with name and shape
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct Tensor {
     pub(crate) name: Arc<str>,
     pub(crate) dims: Arc<[i64]>,
@@ -11,7 +11,7 @@ pub struct Tensor {
 }
 
 /// Tensor specification with name and shape
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct TensorSpec {
     pub name: Arc<str>,
     pub dims: Arc<[i64]>,

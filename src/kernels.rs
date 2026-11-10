@@ -18,28 +18,27 @@ impl Operator {
         inputs: &[Option<&Tensor>],
         attrs: &[(String, AttributesDataValue)],
     ) -> Result<Vec<Tensor>> {
-        if output_names.len() != 1 {
+        // decode_model checks this already
+        if output_names.is_empty() {
             return Err(anyhow!(
-                "operator '{:?}' needs at least one output name",
+                "operator '{:?}' received empty output names list",
                 self,
             ));
         }
-        // TODO: some node have empty nodes, is this valid? should we allow it? idk
+        // according to the ONNX spec, empty output names valid, means optional
+        // decode_model already provides us with minimum outputs
+        // required by the operator for execution
         if output_names.iter().any(|n| n.is_empty()) {
             return Err(anyhow!("operator '{:?}' has an empty output name", self));
         }
-        let first = output_names[0];
-        // let second = output_names[1];
-        // let third = output_names[2];
-        // let fourth = output_names[3];
 
         match self {
-            Operator::Clip => Ok(vec![clip(first, inputs)?]),
-            Operator::Relu => Ok(vec![relu(first, inputs)?]),
-            Operator::PRelu => Ok(vec![prelu(first, inputs)?]),
-            Operator::DepthToSpace => Ok(vec![depth_to_space(first, inputs, attrs)?]),
-            Operator::Conv => Ok(vec![conv(first, inputs, attrs)?]),
-            Operator::Add => Ok(vec![output(first, inputs)?]),
+            Operator::Clip => Ok(vec![clip(output_names[0], inputs)?]),
+            Operator::Relu => Ok(vec![relu(output_names[0], inputs)?]),
+            Operator::PRelu => Ok(vec![prelu(output_names[0], inputs)?]),
+            Operator::DepthToSpace => Ok(vec![depth_to_space(output_names[0], inputs, attrs)?]),
+            Operator::Conv => Ok(vec![conv(output_names[0], inputs, attrs)?]),
+            Operator::Add => Ok(vec![output(output_names[0], inputs)?]),
             _ => Err(anyhow!(
                 "operator '{:?}' has no kernel implemented yet",
                 self
@@ -382,8 +381,8 @@ fn conv(
     };
     let group = group as usize;
 
-    let [sh, sw] = take_attr_i64s_n::<2>(attrs, "strides", [1, 1])?;
-    let [dh, dw] = take_attr_i64s_n::<2>(attrs, "dilations", [1, 1])?;
+    let [sh, sw] = take_attr_i64s_n::<2>(attrs, "strides")?.unwrap_or([1, 1]);
+    let [dh, dw] = take_attr_i64s_n::<2>(attrs, "dilations")?.unwrap_or([1, 1]);
     if sh < 0 || sw < 0 || dh < 0 || dw < 0 {
         return Err(anyhow!("Conv: strides/dilations must be positive"));
     }
@@ -439,7 +438,7 @@ fn conv(
     };
 
     let [pt, pl, pb, pr]: [usize; 4] = if auto_pad == "NOTSET" {
-        let pads = take_attr_i64s_n::<4>(attrs, "pads", [0, 0, 0, 0])?;
+        let pads = take_attr_i64s_n::<4>(attrs, "pads")?.unwrap_or([0, 0, 0, 0]);
         if pads[0] < 0 || pads[1] < 0 || pads[2] < 0 || pads[3] < 0 {
             return Err(anyhow!(
                 "Conv: pads must be non-negative when auto_pad is NOTSET"
