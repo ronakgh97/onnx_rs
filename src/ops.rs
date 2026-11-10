@@ -1,49 +1,20 @@
 //! Onnx operator specifications and attributes
 use anyhow::anyhow;
 
-#[derive(Clone, Copy, Debug)]
+#[repr(i32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum AttributesDataKind {
-    F32,
-    I64,
-    Str,
-    Ints,
+    F32 = 1,
+    I64 = 2,
+    Str = 3,
+    // ... some crap that we don't support yet
+    // F32s = 6,
+    Ints = 7,
+    // Strs = 8,
+    // ... more crap we don't want
 }
 
-impl AttributesDataKind {
-    #[inline]
-    fn metadata(&self) -> (&'static str, i32, &'static str) {
-        match self {
-            AttributesDataKind::F32 => ("f32", 1, "FLOAT"),
-            AttributesDataKind::I64 => ("i64", 2, "INT"),
-            AttributesDataKind::Str => ("string", 3, "STRING"),
-            AttributesDataKind::Ints => ("i64 list", 7, "INTS"),
-        }
-    }
-    #[inline]
-    pub(crate) fn name(self) -> &'static str {
-        self.metadata().0
-    }
-    #[inline]
-    pub(crate) fn proto_code(&self) -> i32 {
-        self.metadata().1
-    }
-    #[inline]
-    pub(crate) fn proto_name(&self) -> &'static str {
-        self.metadata().2
-    }
-    #[inline]
-    pub(crate) fn proto_name_from_proto_code(code: i32) -> Option<&'static str> {
-        match code {
-            1 => Some("FLOAT"),
-            2 => Some("INT"),
-            3 => Some("STRING"),
-            7 => Some("INTS"),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, PartialOrd)]
 pub enum AttributesDataValue {
     F32(f32),
     I64(i64),
@@ -100,7 +71,7 @@ pub fn take_attr_str<'s>(
 }
 
 #[inline(always)]
-pub fn take_attr_ints<'s>(
+pub fn take_attr_i64s<'s>(
     attrs: &'s [(String, AttributesDataValue)],
     name: &str,
 ) -> anyhow::Result<Option<&'s [i64]>> {
@@ -115,45 +86,23 @@ pub fn take_attr_ints<'s>(
     Ok(None)
 }
 
-#[inline(always)]
-pub fn take_two_attr_int(
+pub fn take_attr_i64s_n<const N: usize>(
     attrs: &[(String, AttributesDataValue)],
     name: &str,
-    default: [i64; 2],
-) -> anyhow::Result<[usize; 2]> {
-    let Some(v) = take_attr_ints(attrs, name)? else {
-        return Ok([default[0] as usize, default[1] as usize]);
+    default: [i64; N],
+) -> anyhow::Result<[i64; N]> {
+    let Some(v) = take_attr_i64s(attrs, name)? else {
+        return Ok(default);
     };
-    if v.len() != 2 {
-        return Err(anyhow!("attribute '{name}': wants 2 ints, got {}", v.len()));
+    if v.len() != N {
+        return Err(anyhow!(
+            "attribute '{name}': wants {N} i64s, got {}",
+            v.len()
+        ));
     }
-    if v.iter().any(|&x| x < 0) {
-        return Err(anyhow!("attribute '{name}': negative value"));
-    }
-    Ok([v[0] as usize, v[1] as usize])
-}
-
-#[inline(always)]
-pub fn take_four_attr_int(
-    attrs: &[(String, AttributesDataValue)],
-    name: &str,
-    default: [i64; 4],
-) -> anyhow::Result<[usize; 4]> {
-    let Some(v) = take_attr_ints(attrs, name)? else {
-        return Ok([
-            default[0] as usize,
-            default[1] as usize,
-            default[2] as usize,
-            default[3] as usize,
-        ]);
-    };
-    if v.len() != 4 {
-        return Err(anyhow!("attribute '{name}': wants 4 ints, got {}", v.len()));
-    }
-    if v.iter().any(|&x| x < 0) {
-        return Err(anyhow!("attribute '{name}': negative value"));
-    }
-    Ok([v[0] as usize, v[1] as usize, v[2] as usize, v[3] as usize])
+    let mut out = [0i64; N];
+    out.copy_from_slice(v);
+    Ok(out)
 }
 
 #[rustfmt::skip]

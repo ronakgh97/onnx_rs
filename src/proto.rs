@@ -64,9 +64,11 @@ pub struct AttributeProto {
     #[prost(message, optional, tag = "5")]
     pub t: Option<TensorProto>,
     #[prost(float, repeated, tag = "7")]
-    pub floats: Vec<f32>,
+    pub floats: Vec<f32>, // parsed, but unused
     #[prost(int64, repeated, tag = "8")]
     pub ints: Vec<i64>,
+    #[prost(bytes = "vec", repeated, tag = "9")]
+    pub strings: Vec<Vec<u8>>, // parsed, but unused
     #[prost(int32, optional, tag = "20")]
     pub type_: Option<i32>,
 }

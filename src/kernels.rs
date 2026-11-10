@@ -1,7 +1,6 @@
 //! Kernel implementations for ONNX operators.
 use crate::ops::{
-    AttributesDataValue, Operator, take_attr_i64, take_attr_ints, take_attr_str,
-    take_four_attr_int, take_two_attr_int,
+    AttributesDataValue, Operator, take_attr_i64, take_attr_i64s, take_attr_i64s_n, take_attr_str,
 };
 use crate::tensor::{Tensor, take_tensor};
 use anyhow::{Result, anyhow};
@@ -12,21 +11,35 @@ use std::arch::x86_64::{
 };
 
 impl Operator {
-    /// Compute the output tensor for this operator, given the input tensors and attributes
     #[inline(always)]
     pub fn compute(
         self,
-        output_name: &str,
+        output_names: &[&str],
         inputs: &[Option<&Tensor>],
         attrs: &[(String, AttributesDataValue)],
-    ) -> Result<Tensor> {
+    ) -> Result<Vec<Tensor>> {
+        if output_names.len() != 1 {
+            return Err(anyhow!(
+                "operator '{:?}' needs at least one output name",
+                self,
+            ));
+        }
+        // TODO: some node have empty nodes, is this valid? should we allow it? idk
+        if output_names.iter().any(|n| n.is_empty()) {
+            return Err(anyhow!("operator '{:?}' has an empty output name", self));
+        }
+        let first = output_names[0];
+        // let second = output_names[1];
+        // let third = output_names[2];
+        // let fourth = output_names[3];
+
         match self {
-            Operator::Clip => clip(output_name, inputs),
-            Operator::Relu => relu(output_name, inputs),
-            Operator::PRelu => prelu(output_name, inputs),
-            Operator::DepthToSpace => depth_to_space(output_name, inputs, attrs),
-            Operator::Conv => conv(output_name, inputs, attrs),
-            Operator::Add => add(output_name, inputs),
+            Operator::Clip => Ok(vec![clip(first, inputs)?]),
+            Operator::Relu => Ok(vec![relu(first, inputs)?]),
+            Operator::PRelu => Ok(vec![prelu(first, inputs)?]),
+            Operator::DepthToSpace => Ok(vec![depth_to_space(first, inputs, attrs)?]),
+            Operator::Conv => Ok(vec![conv(first, inputs, attrs)?]),
+            Operator::Add => Ok(vec![output(first, inputs)?]),
             _ => Err(anyhow!(
                 "operator '{:?}' has no kernel implemented yet",
                 self
@@ -35,7 +48,7 @@ impl Operator {
     }
 }
 
-fn clip(name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
+fn clip(output: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
     let x = take_tensor(inputs, 0, "Clip")?;
     let min = if let Some(t) = inputs.get(1).copied().flatten() {
         if t.data.len() != 1 {
@@ -64,7 +77,7 @@ fn clip(name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
     if let (Some(lo), Some(hi)) = (min, max)
         && lo > hi
     {
-        return Tensor::create(name, &x.dims, &vec![hi; x.len()]);
+        return Tensor::create(output, &x.dims, &vec![hi; x.len()]);
     }
 
     // basically do this cmp::min(max, cmp::max(min, x))
@@ -91,15 +104,15 @@ fn clip(name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
         }
     }
 
-    Tensor::create(name, &x.dims, &out_data)
+    Tensor::create(output, &x.dims, &out_data)
 }
 
-fn relu(name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
+fn relu(output: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
     let x = take_tensor(inputs, 0, "Relu")?;
 
     let mut data = vec![0f32; x.data.len()];
     if x.data.is_empty() {
-        return Tensor::create(name, &x.dims, &data);
+        return Tensor::create(output, &x.dims, &data);
     }
 
     if data.len() >= 8 {
@@ -129,10 +142,10 @@ fn relu(name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
         }
     }
 
-    Tensor::create(name, &x.dims, &data)
+    Tensor::create(output, &x.dims, &data)
 }
 
-fn prelu(name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
+fn prelu(output: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
     let x = take_tensor(inputs, 0, "PRelu")?;
     let slope = take_tensor(inputs, 1, "PRelu")?;
     let x_dims = &x.dims;
@@ -163,7 +176,7 @@ fn prelu(name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
     let rank = x_dims.len();
     let mut data = vec![0f32; x.data.len()];
     if x.data.is_empty() {
-        return Tensor::create(name, &x.dims, &data);
+        return Tensor::create(output, &x.dims, &data);
     }
 
     // calculate the number of elements in the last contiguous block
@@ -247,11 +260,11 @@ fn prelu(name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
         }
     }
 
-    Tensor::create(name, &x.dims, &data)
+    Tensor::create(output, &x.dims, &data)
 }
 
 fn depth_to_space(
-    name: &str,
+    output: &str,
     inputs: &[Option<&Tensor>],
     attrs: &[(String, AttributesDataValue)],
 ) -> Result<Tensor> {
@@ -328,13 +341,13 @@ fn depth_to_space(
         }
     }
 
-    Tensor::create(name, &[ni as i64, co as i64, oh as i64, ow as i64], &data)
+    Tensor::create(output, &[ni as i64, co as i64, oh as i64, ow as i64], &data)
 }
 
 // TODO: I dont understand convolution properly, will come back to this later
 // TODO: According to ONNX spec, Conv has some more optionally stuffs, which are ignored for now
 fn conv(
-    name: &str,
+    output: &str,
     inputs: &[Option<&Tensor>],
     attrs: &[(String, AttributesDataValue)],
 ) -> Result<Tensor> {
@@ -354,7 +367,7 @@ fn conv(
         _ => "NOTSET",
     };
 
-    if auto_pad != "NOTSET" && take_attr_ints(attrs, "pads")?.is_some() {
+    if auto_pad != "NOTSET" && take_attr_i64s(attrs, "pads")?.is_some() {
         return Err(anyhow!(
             "Conv: 'pads' attribute cannot be used with auto_pad '{auto_pad}'"
         ));
@@ -369,11 +382,12 @@ fn conv(
     };
     let group = group as usize;
 
-    let [sh, sw] = take_two_attr_int(attrs, "strides", [1, 1])?;
-    let [dh, dw] = take_two_attr_int(attrs, "dilations", [1, 1])?;
-    if sh == 0 || sw == 0 || dh == 0 || dw == 0 {
+    let [sh, sw] = take_attr_i64s_n::<2>(attrs, "strides", [1, 1])?;
+    let [dh, dw] = take_attr_i64s_n::<2>(attrs, "dilations", [1, 1])?;
+    if sh < 0 || sw < 0 || dh < 0 || dw < 0 {
         return Err(anyhow!("Conv: strides/dilations must be positive"));
     }
+    let [sh, sw, dh, dw] = [sh as usize, sw as usize, dh as usize, dw as usize];
 
     let (xd, wd) = (&x.dims, &w.dims);
     if xd.len() != 4 || wd.len() != 4 {
@@ -405,7 +419,7 @@ fn conv(
             "Conv: output channels {m} not divisible by group {group}"
         ));
     }
-    if let Some(ks) = take_attr_ints(attrs, "kernel_shape")?
+    if let Some(ks) = take_attr_i64s(attrs, "kernel_shape")?
         && ks != [kh as i64, kw as i64]
     {
         return Err(anyhow!(
@@ -425,7 +439,18 @@ fn conv(
     };
 
     let [pt, pl, pb, pr]: [usize; 4] = if auto_pad == "NOTSET" {
-        take_four_attr_int(attrs, "pads", [0, 0, 0, 0])?
+        let pads = take_attr_i64s_n::<4>(attrs, "pads", [0, 0, 0, 0])?;
+        if pads[0] < 0 || pads[1] < 0 || pads[2] < 0 || pads[3] < 0 {
+            return Err(anyhow!(
+                "Conv: pads must be non-negative when auto_pad is NOTSET"
+            ));
+        }
+        [
+            pads[0] as usize,
+            pads[1] as usize,
+            pads[2] as usize,
+            pads[3] as usize,
+        ]
     } else {
         // kernel_shape (spatial) from weights
         let k_h = kh;
@@ -570,10 +595,10 @@ fn conv(
         }
     }
 
-    Tensor::create(name, &[n as i64, m as i64, oh as i64, ow as i64], &out)
+    Tensor::create(output, &[n as i64, m as i64, oh as i64, ow as i64], &out)
 }
 
-fn add(name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
+fn output(name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
     let x = take_tensor(inputs, 0, "Add")?;
     let y = take_tensor(inputs, 1, "Add")?;
 

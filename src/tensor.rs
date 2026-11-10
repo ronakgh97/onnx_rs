@@ -5,9 +5,9 @@ use std::sync::Arc;
 /// Tensor of f32 values with name and shape
 #[derive(Clone, Debug, PartialEq)]
 pub struct Tensor {
-    pub name: Arc<str>,
-    pub dims: Arc<[i64]>,
-    pub data: Arc<[f32]>,
+    pub(crate) name: Arc<str>,
+    pub(crate) dims: Arc<[i64]>,
+    pub(crate) data: Arc<[f32]>,
 }
 
 /// Tensor specification with name and shape
@@ -41,6 +41,18 @@ impl Tensor {
         })
     }
     #[inline]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    #[inline]
+    pub fn dims(&self) -> &[i64] {
+        &self.dims
+    }
+    #[inline]
+    pub fn data(&self) -> &[f32] {
+        &self.data
+    }
+    #[inline]
     pub fn len(&self) -> usize {
         self.data.len()
     }
@@ -51,6 +63,7 @@ impl Tensor {
     #[inline]
     pub fn strides(&self) -> Vec<i64> {
         let mut strides = vec![1i64; self.dims.len()];
+        // rank-0 tensors have no strides, return empty vector
         if !self.dims.is_empty() {
             for i in (0..self.dims.len() - 1).rev() {
                 strides[i] = strides[i + 1] * self.dims[i + 1];
