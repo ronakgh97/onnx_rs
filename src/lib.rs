@@ -20,11 +20,11 @@ use std::sync::Arc;
 #[repr(C)]
 #[derive(Clone)]
 pub struct Node {
-    name: String,                              // node_name
-    op: Operator,                              // operator_type
-    inputs: Vec<String>,                       // multiple_inputs
-    outputs: Vec<String>,                      // multiple_outputs
-    attrs: Vec<(String, AttributesDataValue)>, // list of (attribute_name, attribute_value) associated
+    name: String,                                // node_name
+    op: Operator,                                // operator_type
+    inputs: Arc<[String]>,                       // multiple_inputs
+    outputs: Arc<[String]>,                      // multiple_outputs
+    attrs: Arc<[(String, AttributesDataValue)]>, // list of (attribute_name, attribute_value) associated
 }
 
 impl Node {
@@ -46,13 +46,13 @@ impl Node {
 #[repr(C)]
 #[derive(Clone)]
 pub struct Model {
-    ir_version: i64,           // for version check
-    opset: i64,                // for compatibility check
-    nodes: Vec<Node>,          // all nodes in the graph, in topological order
-    initializers: Vec<Tensor>, // weights and biases
-    inputs: Vec<TensorSpec>,   // all the inputs that the graph expects, with their names and shapes
-    outputs: Vec<TensorSpec>, // all the outputs that the graph produces, with their names and shapes
-    operators: Vec<String>,   // all the operators used in the graph, in topological order (deduped)
+    ir_version: i64,             // for version check
+    opset: i64,                  // for compatibility check
+    nodes: Arc<[Node]>,          // all nodes in the graph, in topological order
+    operators: Arc<[String]>, // all the operators used in the graph, in topological order (deduped)
+    initializers: Arc<[Tensor]>, // weights and biases
+    inputs: Arc<[TensorSpec]>, // all the inputs that the graph expects, with their names and shapes
+    outputs: Arc<[TensorSpec]>, // all the outputs that the graph produces, with their names and shapes
 }
 
 impl Model {
@@ -73,43 +73,53 @@ impl Model {
                 self.outputs.len()
             ));
         }
+
+        if data.dims != self.inputs[0].dims {
+            return Err(anyhow!(
+                "run_single: input dims {:?} does not match graph declared dims {:?}",
+                data.dims,
+                self.inputs[0].dims
+            ));
+        }
+
         // build scope, initializers + input
+        // TODO: scope keeps growing
         let mut scope: HashMap<&str, Tensor> =
             HashMap::with_capacity(self.initializers.len() + 1 + self.nodes.len() * 2);
-        for t in &self.initializers {
+        for t in self.initializers.iter() {
             scope.insert(t.name.as_ref(), t.clone());
         }
         scope.insert(self.inputs[0].name.as_ref(), data.clone());
 
         // walk the graph in topological order
         let mut output_declared: Vec<&str> = Vec::with_capacity(self.nodes.len() * 2);
-        for node in &self.nodes {
+        for node in self.nodes.iter() {
             // collect inputs first (avoids borrow conflict when inserting outputs)
             let mut inputs: Vec<Option<&Tensor>> = Vec::with_capacity(node.inputs.len());
-            for name in &node.inputs {
+            for name in node.inputs.iter() {
                 if name.is_empty() {
                     inputs.push(None);
                     continue;
                 }
                 let t = scope
                     .get(name.as_str())
-                    .ok_or_else(|| anyhow!("{}: input '{}' is not in scope", node.name, name))?;
+                    .ok_or_else(|| anyhow!("{}: input '{}' is not in scope", node.name(), name))?;
                 inputs.push(Some(t));
             }
             output_declared.clear(); // reuse buffer
-            for name in &node.outputs {
+            for name in node.outputs.iter() {
                 if !name.is_empty() {
                     output_declared.push(name.as_str());
                 }
             }
             if output_declared.is_empty() {
-                return Err(anyhow!("{}: node has zero non-empty outputs", node.name));
+                return Err(anyhow!("{}: node has zero non-empty outputs", node.name()));
             }
             let output_tensor = node.op.compute(&output_declared, &inputs, &node.attrs)?;
             if output_tensor.len() != output_declared.len() {
                 return Err(anyhow!(
                     "{}: operator '{:?}' produced {} outputs, declared {}",
-                    node.name,
+                    node.name(),
                     node.op,
                     output_tensor.len(),
                     output_declared.len()
@@ -140,7 +150,7 @@ impl Model {
     /// Run graph with the given feed of input tensors, returning the output tensors
     pub fn run(&self, feed: &HashMap<String, Tensor>) -> Result<Vec<Tensor>> {
         // validate feed, every declared input is provided, and no extra inputs are given
-        for spec in &self.inputs {
+        for spec in self.inputs.iter() {
             let Some(t) = feed.get(spec.name.as_ref()) else {
                 return Err(anyhow!("feed: missing input '{}'", spec.name));
             };
@@ -163,7 +173,7 @@ impl Model {
         // pre-size scope to avoid rehashing; initializers + feed entries
         let mut scope: HashMap<&str, Tensor> =
             HashMap::with_capacity(self.initializers.len() + feed.len() + self.nodes.len() * 2);
-        for t in &self.initializers {
+        for t in self.initializers.iter() {
             scope.insert(t.name.as_ref(), t.clone());
         }
         for (name, t) in feed {
@@ -173,35 +183,35 @@ impl Model {
         // walk the graph in topological order,
         // compute each node's output(s) and bind them to scope
         let mut output_declared: Vec<&str> = Vec::with_capacity(4);
-        for node in &self.nodes {
+        for node in self.nodes.iter() {
             // collect inputs first (avoids borrow conflict when inserting outputs)
             let mut inputs: Vec<Option<&Tensor>> = Vec::with_capacity(node.inputs.len());
-            for name in &node.inputs {
+            for name in node.inputs.iter() {
                 if name.is_empty() {
                     inputs.push(None);
                     continue;
                 }
                 let t = scope
                     .get(name.as_str())
-                    .ok_or_else(|| anyhow!("{}: input '{}' is not in scope", node.name, name))?;
+                    .ok_or_else(|| anyhow!("{}: input '{}' is not in scope", node.name(), name))?;
                 inputs.push(Some(t));
             }
             output_declared.clear(); // reuse buffer
 
             // fill in output_declared with non-empty output names
-            for name in &node.outputs {
+            for name in node.outputs.iter() {
                 if !name.is_empty() {
                     output_declared.push(name.as_str());
                 }
             }
             if output_declared.is_empty() {
-                return Err(anyhow!("{}: node has zero non-empty outputs", node.name));
+                return Err(anyhow!("{}: node has zero non-empty outputs", node.name()));
             }
             let output_tensor = node.op.compute(&output_declared, &inputs, &node.attrs)?;
             if output_tensor.len() != output_declared.len() {
                 return Err(anyhow!(
                     "{}: operator '{:?}' produced {} outputs, declared {}",
-                    node.name,
+                    node.name(),
                     node.op,
                     output_tensor.len(),
                     output_declared.len()
@@ -215,7 +225,7 @@ impl Model {
 
         // graph is done, collect outputs from scope
         let mut produced = Vec::with_capacity(self.outputs.len());
-        for spec in &self.outputs {
+        for spec in self.outputs.iter() {
             let Some(t) = scope.get(spec.name.as_ref()) else {
                 return Err(anyhow!("output '{}' was never produced", spec.name));
             };
@@ -247,15 +257,17 @@ impl Model {
     pub fn inputs_outputs(&self) -> (&[TensorSpec], &[TensorSpec]) {
         (&self.inputs, &self.outputs)
     }
-    /// Get all the nodes in the model graph
+    /// Get all the nodes in the model graph in topological order
     pub fn nodes(&self) -> &[Node] {
         &self.nodes
     }
-    /// Get the operators used in the model
+    /// Get the operators used in the model in topological order (deduplicated)
     pub fn operators(&self) -> &[String] {
         &self.operators
     }
 }
+
+// TODO: Better error messages, more failure context and consistency
 
 fn decode_model(bytes: &[u8]) -> Result<Model> {
     let proto = match ModelProto::decode(bytes) {
@@ -453,7 +465,7 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
     // validate & collect graph nodes
     let mut nodes: Vec<Node> = Vec::with_capacity(graph.node.len());
     for (i, np) in graph.node.iter().enumerate() {
-        let label = if np.name.is_empty() {
+        let node_name = if np.name.is_empty() {
             // don't error on empty name,
             // TODO: hope it's just a placeholder, not some weird case I need to handle
             // screw it, I am not allowing this
@@ -464,22 +476,22 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
         };
 
         let Some(op) = Operator::lookup(&np.op_type) else {
-            return Err(anyhow!("{label}: op '{}' is not supported", np.op_type));
+            return Err(anyhow!("{node_name}: op '{}' is not supported", np.op_type));
         };
         if !np.domain.is_empty() && np.domain != "ai.onnx" {
-            return Err(anyhow!("{label}: domain '{}' not core", np.domain));
+            return Err(anyhow!("{node_name}: domain '{}' not core", np.domain));
         }
         let spec = op.spec();
         if opset < spec.min_opset {
             return Err(anyhow!(
-                "{label}: '{}' needs opset ≥ {}, model declares {opset}",
+                "{node_name}: '{}' needs opset ≥ {}, model declares {opset}",
                 op.static_str(),
                 spec.min_opset
             ));
         }
         if np.input.len() < spec.arity_in.0 || np.input.len() > spec.arity_in.1 {
             return Err(anyhow!(
-                "{label}: '{}' wants min={}..max={} inputs, got {}",
+                "{node_name}: '{}' wants min={}..max={} inputs, got {}",
                 op.static_str(),
                 spec.arity_in.0,
                 spec.arity_in.1,
@@ -488,7 +500,7 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
         }
         if np.output.len() < spec.arity_out.0 || np.output.len() > spec.arity_out.1 {
             return Err(anyhow!(
-                "{label}: '{}' wants min={}..max={} outputs, got {}",
+                "{node_name}: '{}' wants min={}..max={} outputs, got {}",
                 op.static_str(),
                 spec.arity_out.0,
                 spec.arity_out.1,
@@ -500,7 +512,7 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
         for (idx, oname) in np.output.iter().enumerate() {
             if idx < spec.arity_out.0 && oname.is_empty() {
                 return Err(anyhow!(
-                    "{label}: '{}' required output #{} has empty name",
+                    "{node_name}: '{}' required output #{} has empty name",
                     op.static_str(),
                     idx
                 ));
@@ -512,7 +524,7 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
         for a in &np.attribute {
             let Some(&(name, kind)) = spec.attrs.iter().find(|(n, _)| *n == a.name.as_str()) else {
                 return Err(anyhow!(
-                    "{label}: attribute '{}' unknown for '{}'",
+                    "{node_name}: attribute '{}' unknown for '{}'",
                     a.name,
                     op.static_str()
                 ));
@@ -523,7 +535,7 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
             let expected_type = kind as i32;
             if a.type_ != Some(expected_type) {
                 return Err(anyhow!(
-                    "{label}: attribute '{name}' expects type {}, got {}",
+                    "{node_name}: attribute '{name}' expects type {}, got {}",
                     atype(expected_type),
                     if let Some(t) = got_type {
                         atype(t)
@@ -540,13 +552,13 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
                 (AttributesDataKind::Str, _, _, Some(s), _) => match String::from_utf8(s.clone()) {
                     Ok(st) => AttributesDataValue::Str(st),
                     Err(_) => {
-                        return Err(anyhow!("{label}: attribute '{name}' is not valid utf8"));
+                        return Err(anyhow!("{node_name}: attribute '{name}' is not valid utf8"));
                     }
                 },
                 (AttributesDataKind::Ints, _, _, _, _) => AttributesDataValue::Ints(a.ints.clone()),
                 _ => {
                     return Err(anyhow!(
-                        "{label}: attribute '{}' does not carry payload",
+                        "{node_name}: attribute '{}' does not carry payload",
                         a.name,
                     ));
                 }
@@ -563,17 +575,17 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
             }
             if !defined.insert(oname.to_string()) {
                 return Err(anyhow!(
-                    "{label}: output '{oname}' reuses an initializer or graph input name"
+                    "{node_name}: output '{oname}' reuses an initializer or graph input name"
                 ));
             }
         }
 
         nodes.push(Node {
             op,
-            name: label,
-            inputs: np.input.clone(),
-            outputs: np.output.clone(),
-            attrs,
+            name: node_name,
+            inputs: Arc::from(np.input.clone()),
+            outputs: Arc::from(np.output.clone()),
+            attrs: Arc::from(attrs),
         });
     }
 
@@ -606,21 +618,25 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
         }
     }
 
-    let mut operators: Vec<String> = nodes
+    let mut dedup_set = HashSet::with_capacity(nodes.len());
+
+    let operators: Vec<String> = nodes
         .iter()
-        .map(|n| n.op.static_str().to_string())
+        .filter_map(|node| {
+            let op = node.op();
+            dedup_set.insert(op).then_some(op)
+        })
+        .map(|s| s.to_string())
         .collect();
-    operators.sort_unstable();
-    operators.dedup();
 
     Ok(Model {
         ir_version,
         opset,
-        nodes,
-        initializers,
-        inputs,
-        outputs,
-        operators,
+        nodes: Arc::from(nodes),
+        operators: Arc::from(operators),
+        initializers: Arc::from(initializers),
+        inputs: Arc::from(inputs),
+        outputs: Arc::from(outputs),
     })
 }
 

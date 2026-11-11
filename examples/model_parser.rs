@@ -12,6 +12,8 @@ fn main() -> Result<()> {
     println!("input needed: {:?}", inputs);
     println!("output given: {:?}", outputs);
     println!("node count: {:?}", model.nodes().len());
+    println!("operators used: {:?}", model.operators());
+    println!();
     for (i, node) in model.nodes().iter().enumerate() {
         let (inputs, outputs) = node.inputs_outputs();
         println!(
@@ -22,7 +24,6 @@ fn main() -> Result<()> {
             outputs,
         );
     }
-    println!("operators used: {:?}", model.operators());
 
     Ok(())
 }

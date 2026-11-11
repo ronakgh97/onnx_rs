@@ -47,6 +47,8 @@ impl Operator {
     }
 }
 
+// TODO: Need reference inputs/outputs for correctness testing
+
 fn clip(output: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
     let x = take_tensor(inputs, 0, "Clip")?;
     let min = if let Some(t) = inputs.get(1).copied().flatten() {
