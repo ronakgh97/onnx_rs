@@ -15,7 +15,7 @@ Notes:
 
 Benchmarks and correctness (running [srgan](https://aihub.qualcomm.com/compute/models/srgan), 1.55M params):
 
-| Runtime | Time     | Input                   | Output                     |
-|---------|----------|-------------------------|----------------------------|
-| ONNS_RS | 5.55s    | ![img](input_image.png) | ![img](ort_output.png)     |
-| ORT     | 262.80ms | ![img](input_image.png) | ![img](onnx_rs_output.png) |
+| Runtime | Time     | Input                                   | Output                                     |
+|---------|----------|-----------------------------------------|--------------------------------------------|
+| ONNX_RS | 5.55s    | <img src="input_image.png" width="512"> | <img src="ort_output.png" width="512">     |
+| ORT     | 262.80ms | <img src="input_image.png" width="512"> | <img src="onnx_rs_output.png" width="512"> |

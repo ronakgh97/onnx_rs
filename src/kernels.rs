@@ -6,8 +6,9 @@ use crate::tensor::{Tensor, take_tensor};
 use anyhow::{Result, anyhow};
 use blas_rs::*;
 use std::arch::x86_64::{
-    _CMP_LT_OQ, _mm256_add_ps, _mm256_blendv_ps, _mm256_cmp_ps, _mm256_loadu_ps, _mm256_max_ps,
-    _mm256_min_ps, _mm256_mul_ps, _mm256_set1_ps, _mm256_setzero_ps, _mm256_storeu_ps,
+    __m256, _CMP_LT_OQ, _mm256_add_ps, _mm256_blendv_ps, _mm256_cmp_ps, _mm256_div_ps,
+    _mm256_loadu_ps, _mm256_max_ps, _mm256_min_ps, _mm256_mul_ps, _mm256_set1_ps,
+    _mm256_setzero_ps, _mm256_storeu_ps, _mm256_sub_ps,
 };
 
 impl Operator {
@@ -39,6 +40,9 @@ impl Operator {
             Operator::DepthToSpace => Ok(vec![depth_to_space(output_names[0], inputs, attrs)?]),
             Operator::Conv => Ok(vec![conv(output_names[0], inputs, attrs)?]),
             Operator::Add => Ok(vec![add(output_names[0], inputs)?]),
+            Operator::Sub => Ok(vec![sub(output_names[0], inputs)?]),
+            Operator::Mul => Ok(vec![mul(output_names[0], inputs)?]),
+            Operator::Div => Ok(vec![div(output_names[0], inputs)?]),
             _ => Err(anyhow!(
                 "operator '{:?}' has no kernel implemented yet",
                 self
@@ -638,11 +642,150 @@ fn add(output: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
         return Tensor::create(output, x_dims, &data);
     }
 
-    // compute strides
+    broadcast_binary_op(
+        x,
+        y,
+        output,
+        |a, b| a + b,
+        |va, vb| unsafe { _mm256_add_ps(va, vb) },
+    )
+}
+
+fn sub(output: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
+    let x = take_tensor(inputs, 0, "Sub")?;
+    let y = take_tensor(inputs, 1, "Sub")?;
+
+    let x_dims = &x.dims;
+    let y_dims = &y.dims;
+
+    // fast simd path for same shape tensors
+    if x_dims == y_dims {
+        let mut data = vec![0f32; x.data.len()];
+        let (xc, ar) = x.data.as_chunks::<8>();
+        let (yc, br) = y.data.as_chunks::<8>();
+        let (oc, or) = data.as_chunks_mut::<8>();
+        unsafe {
+            for i in 0..oc.len() {
+                let v = _mm256_sub_ps(
+                    _mm256_loadu_ps(xc[i].as_ptr()),
+                    _mm256_loadu_ps(yc[i].as_ptr()),
+                );
+                _mm256_storeu_ps(oc[i].as_mut_ptr(), v);
+            }
+        }
+        // handle remainder
+        for i in 0..or.len() {
+            or[i] = ar[i] - br[i];
+        }
+
+        return Tensor::create(output, x_dims, &data);
+    }
+
+    broadcast_binary_op(
+        x,
+        y,
+        output,
+        |a, b| a - b,
+        |va, vb| unsafe { _mm256_sub_ps(va, vb) },
+    )
+}
+
+fn mul(output: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
+    let x = take_tensor(inputs, 0, "Mul")?;
+    let y = take_tensor(inputs, 1, "Mul")?;
+
+    let x_dims = &x.dims;
+    let y_dims = &y.dims;
+
+    // fast simd path for same shape tensors
+    if x_dims == y_dims {
+        let mut data = vec![0f32; x.data.len()];
+        let (xc, ar) = x.data.as_chunks::<8>();
+        let (yc, br) = y.data.as_chunks::<8>();
+        let (oc, or) = data.as_chunks_mut::<8>();
+        unsafe {
+            for i in 0..oc.len() {
+                let v = _mm256_mul_ps(
+                    _mm256_loadu_ps(xc[i].as_ptr()),
+                    _mm256_loadu_ps(yc[i].as_ptr()),
+                );
+                _mm256_storeu_ps(oc[i].as_mut_ptr(), v);
+            }
+        }
+        // handle remainder
+        for i in 0..or.len() {
+            or[i] = ar[i] * br[i];
+        }
+
+        return Tensor::create(output, x_dims, &data);
+    }
+
+    broadcast_binary_op(
+        x,
+        y,
+        output,
+        |a, b| a * b,
+        |va, vb| unsafe { _mm256_mul_ps(va, vb) },
+    )
+}
+
+fn div(output: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
+    let x = take_tensor(inputs, 0, "Div")?;
+    let y = take_tensor(inputs, 1, "Div")?;
+
+    let x_dims = &x.dims;
+    let y_dims = &y.dims;
+
+    // fast simd path for same shape tensors
+    if x_dims == y_dims {
+        let mut data = vec![0f32; x.data.len()];
+        let (xc, ar) = x.data.as_chunks::<8>();
+        let (yc, br) = y.data.as_chunks::<8>();
+        let (oc, or) = data.as_chunks_mut::<8>();
+        unsafe {
+            for i in 0..oc.len() {
+                let v = _mm256_div_ps(
+                    _mm256_loadu_ps(xc[i].as_ptr()),
+                    _mm256_loadu_ps(yc[i].as_ptr()),
+                );
+                _mm256_storeu_ps(oc[i].as_mut_ptr(), v);
+            }
+        }
+        // handle remainder
+        for i in 0..or.len() {
+            or[i] = ar[i] / br[i];
+        }
+
+        return Tensor::create(output, x_dims, &data);
+    }
+
+    broadcast_binary_op(
+        x,
+        y,
+        output,
+        |a, b| a / b,
+        |va, vb| unsafe { _mm256_div_ps(va, vb) },
+    )
+}
+
+// shared broadcasting logic for binary ops (Add, Sub, Mul, Div)
+fn broadcast_binary_op<F, G>(
+    x: &Tensor,
+    y: &Tensor,
+    output: &str,
+    scalar_op: F,
+    simd_op: G,
+) -> Result<Tensor>
+where
+    F: Fn(f32, f32) -> f32,
+    G: Fn(__m256, __m256) -> __m256,
+{
+    let x_dims = &x.dims;
+    let y_dims = &y.dims;
+
     let x_strides: Vec<usize> = x.strides().iter().map(|&s| s as usize).collect();
     let y_strides: Vec<usize> = y.strides().iter().map(|&s| s as usize).collect();
 
-    // compute output dimensions with broadcasting
     let rank = x_dims.len().max(y_dims.len());
     let x_pad = rank - x_dims.len();
     let y_pad = rank - y_dims.len();
@@ -663,7 +806,8 @@ fn add(output: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
             xd
         } else {
             return Err(anyhow!(
-                "Add: cannot broadcast X dims {:?} with Y dims {:?}",
+                "{}: cannot broadcast X dims {:?} with Y dims {:?}",
+                output,
                 x_dims,
                 y_dims
             ));
@@ -682,24 +826,52 @@ fn add(output: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
     let total: usize = out_dims
         .iter()
         .try_fold(1usize, |a, &d| a.checked_mul(d as usize))
-        .ok_or_else(|| anyhow!("Add: output dims {out_dims:?} overflow element count"))?;
+        .ok_or_else(|| {
+            anyhow!(
+                "{}: output dims {:?} overflow element count",
+                output,
+                out_dims
+            )
+        })?;
     let mut data = vec![0f32; total];
 
-    let mut coords = vec![0usize; rank];
-    let (mut xi, mut yi) = (0usize, 0usize);
-    for dst in &mut data {
-        *dst = x.data[xi] + y.data[yi];
+    // check if, SIMD can be used for the whole output
+    // i.e. contiguous, no broadcasting on inner dims
+    let x_contiguous = x_strides.iter().all(|&s| s > 0);
+    let y_contiguous = y_strides.iter().all(|&s| s > 0);
+    let no_broadcast = bx_strides.iter().all(|&s| s > 0) && by_strides.iter().all(|&s| s > 0);
 
-        for k in (0..rank).rev() {
-            coords[k] += 1;
-            if coords[k] < out_dims[k] as usize {
-                xi += bx_strides[k];
-                yi += by_strides[k];
-                break;
+    if x_contiguous && y_contiguous && no_broadcast && total >= 8 {
+        let simd_len = total & !7; // this is (total - (total % 8))
+        unsafe {
+            for i in (0..simd_len).step_by(8) {
+                let va = _mm256_loadu_ps(x.data.as_ptr().add(i));
+                let vb = _mm256_loadu_ps(y.data.as_ptr().add(i));
+                let vr = simd_op(va, vb);
+                _mm256_storeu_ps(data.as_mut_ptr().add(i), vr);
             }
-            coords[k] = 0;
-            xi -= (out_dims[k] as usize - 1) * bx_strides[k];
-            yi -= (out_dims[k] as usize - 1) * by_strides[k];
+        }
+        for (i, val) in data.iter_mut().enumerate().take(total).skip(simd_len) {
+            *val = scalar_op(x.data[i], y.data[i]);
+        }
+    } else {
+        // scalar broadcasting path, with strides and coords
+        let mut coords = vec![0usize; rank];
+        let (mut xi, mut yi) = (0usize, 0usize);
+        for dst in &mut data {
+            *dst = scalar_op(x.data[xi], y.data[yi]);
+
+            for k in (0..rank).rev() {
+                coords[k] += 1;
+                if coords[k] < out_dims[k] as usize {
+                    xi += bx_strides[k];
+                    yi += by_strides[k];
+                    break;
+                }
+                coords[k] = 0;
+                xi -= (out_dims[k] as usize - 1) * bx_strides[k];
+                yi -= (out_dims[k] as usize - 1) * by_strides[k];
+            }
         }
     }
 
