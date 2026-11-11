@@ -6,7 +6,8 @@ use ort::{inputs, session::Session};
 use std::time::Instant;
 
 fn main() -> Result<()> {
-    let in_image = image::open("input_image.png")?.to_rgb8();
+    // input image must be 128x128
+    let in_image = image::open("images/sample.png")?.to_rgb8();
     let model_path = std::env::args()
         .nth(1)
         .ok_or_else(|| anyhow::anyhow!("no model path provided"))?;
@@ -20,9 +21,9 @@ fn main() -> Result<()> {
 
     let input = Tensor::create("inputs", &[1, 3, 128, 128], &data)?;
     let output = model.run_single(input)?;
-    save_image_from_tensor(output.data(), "onnx_rs_output.png")?;
+    save_image_from_tensor(output.data(), "images/onnx_rs_x4.png")?;
     println!("done in : {:?}", start.elapsed());
-    println!("saved onnx_rs_output.png");
+    println!("saved images/onnx_rs_x4.png");
 
     // ---
 
@@ -40,9 +41,9 @@ fn main() -> Result<()> {
     let input = TensorRef::from_array_view(([1, 3, 128, 128], data.as_ref()))?;
     let output = session.run(inputs!["image" => input])?;
     let (_, output) = output["upscaled_image"].try_extract_tensor::<f32>()?;
-    save_image_from_tensor(output, "ort_output.png")?;
+    save_image_from_tensor(output, "images/ort_x4.png")?;
     println!("done in : {:?}", start.elapsed());
-    println!("saved ort_output.png");
+    println!("saved images/ort_x4.png");
 
     Ok(())
 }
