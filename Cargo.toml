@@ -15,8 +15,8 @@ name = "onnx_rs"
 path = "src/lib.rs"
 
 [profile.release]
-opt-level = 3
-codegen-units = 24
+opt-level = 2
+codegen-units = 64
 incremental = true
 lto = "fat"
 debug = false

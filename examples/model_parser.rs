@@ -1,12 +1,12 @@
 use anyhow::Result;
 use onnx_rs::Model;
 fn main() -> Result<()> {
-    let args = std::env::args()
+    let model_path = std::env::args()
         .nth(1)
         .ok_or_else(|| anyhow::anyhow!("no model path provided"))?;
     let start = std::time::Instant::now();
-    let model = Model::from_file(&args)?;
-    println!("loaded model from {args} in {:?}", start.elapsed());
+    let model = Model::from_file(&model_path)?;
+    println!("loaded model from {model_path} in {:?}", start.elapsed());
 
     let (inputs, outputs) = model.inputs_outputs();
     println!("input needed: {:?}", inputs);

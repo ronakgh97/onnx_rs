@@ -436,11 +436,9 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
     let mut nodes: Vec<Node> = Vec::with_capacity(graph.node.len());
     for (i, np) in graph.node.iter().enumerate() {
         let node_name = if np.name.is_empty() {
-            // don't error on empty name,
-            // TODO: hope it's just a placeholder, not some weird case I need to handle
-            // screw it, I am not allowing this
-            // format!("node#{i}")
-            return Err(anyhow!("node#{i} has no name"));
+            // don't error on empty name, onnx allows optional node names
+            // TODO: hope it's just a placeholder, not some weird case I don't want to handle
+            format!("unknown#{i}")
         } else {
             np.name.clone()
         };

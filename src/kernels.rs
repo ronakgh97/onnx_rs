@@ -6,8 +6,8 @@ use crate::tensor::{Tensor, take_tensor};
 use anyhow::{Result, anyhow};
 use blas_rs::*;
 use std::arch::x86_64::{
-    _CMP_LT_OQ, _mm256_blendv_ps, _mm256_cmp_ps, _mm256_loadu_ps, _mm256_max_ps, _mm256_min_ps,
-    _mm256_mul_ps, _mm256_set1_ps, _mm256_setzero_ps, _mm256_storeu_ps,
+    _CMP_LT_OQ, _mm256_add_ps, _mm256_blendv_ps, _mm256_cmp_ps, _mm256_loadu_ps, _mm256_max_ps,
+    _mm256_min_ps, _mm256_mul_ps, _mm256_set1_ps, _mm256_setzero_ps, _mm256_storeu_ps,
 };
 
 impl Operator {
@@ -38,7 +38,7 @@ impl Operator {
             Operator::PRelu => Ok(vec![prelu(output_names[0], inputs)?]),
             Operator::DepthToSpace => Ok(vec![depth_to_space(output_names[0], inputs, attrs)?]),
             Operator::Conv => Ok(vec![conv(output_names[0], inputs, attrs)?]),
-            Operator::Add => Ok(vec![output(output_names[0], inputs)?]),
+            Operator::Add => Ok(vec![add(output_names[0], inputs)?]),
             _ => Err(anyhow!(
                 "operator '{:?}' has no kernel implemented yet",
                 self
@@ -608,12 +608,35 @@ fn conv(
     Tensor::create(output, &[n as i64, m as i64, oh as i64, ow as i64], &out)
 }
 
-fn output(name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
+fn add(output: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
     let x = take_tensor(inputs, 0, "Add")?;
     let y = take_tensor(inputs, 1, "Add")?;
 
     let x_dims = &x.dims;
     let y_dims = &y.dims;
+
+    // fast simd path for same shape tensors
+    if x_dims == y_dims {
+        let mut data = vec![0f32; x.data.len()];
+        let (xc, ar) = x.data.as_chunks::<8>();
+        let (yc, br) = y.data.as_chunks::<8>();
+        let (oc, or) = data.as_chunks_mut::<8>();
+        unsafe {
+            for i in 0..oc.len() {
+                let v = _mm256_add_ps(
+                    _mm256_loadu_ps(xc[i].as_ptr()),
+                    _mm256_loadu_ps(yc[i].as_ptr()),
+                );
+                _mm256_storeu_ps(oc[i].as_mut_ptr(), v);
+            }
+        }
+        // handle remainder
+        for i in 0..or.len() {
+            or[i] = ar[i] + br[i];
+        }
+
+        return Tensor::create(output, x_dims, &data);
+    }
 
     // compute strides
     let x_strides: Vec<usize> = x.strides().iter().map(|&s| s as usize).collect();
@@ -680,5 +703,5 @@ fn output(name: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
         }
     }
 
-    Tensor::create(name, &out_dims, &data)
+    Tensor::create(output, &out_dims, &data)
 }

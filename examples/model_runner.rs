@@ -7,10 +7,13 @@ use std::time::Instant;
 
 fn main() -> Result<()> {
     let in_image = image::open("input_image.png")?.to_rgb8();
+    let model_path = std::env::args()
+        .nth(1)
+        .ok_or_else(|| anyhow::anyhow!("no model path provided"))?;
 
     println!("running onnx_rs... ");
     let start = Instant::now();
-    let model = Model::from_file("models/srgan_onnx/srgan_single.onnx")?;
+    let model = Model::from_file(&model_path)?;
 
     let mut data = vec![0f32; 3 * 128 * 128];
     fill_tensor_from_image(&in_image, &mut data);
@@ -29,7 +32,7 @@ fn main() -> Result<()> {
     let mut session = Session::builder(&env)?
         .with_execution_providers([CPU::default().build()])
         .map_err(|e| anyhow::anyhow!("unable to set execution providers: {e}"))?
-        .commit_from_file("models/srgan_onnx/srgan_single.onnx")?;
+        .commit_from_file(&model_path)?;
 
     let mut data = vec![0f32; 3 * 128 * 128];
     fill_tensor_from_image(&in_image, &mut data);
