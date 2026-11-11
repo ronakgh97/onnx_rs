@@ -65,7 +65,7 @@ impl Model {
         decode_model(&std::fs::read(path)?)
     }
     /// Run 1-input/1-output graph with the given input tensor, returning the output tensor
-    pub fn run_single(&self, data: &Tensor) -> Result<Tensor> {
+    pub fn run_single(&self, data: Tensor) -> Result<Tensor> {
         if self.inputs.len() != 1 || self.outputs.len() != 1 {
             return Err(anyhow!(
                 "run_single needs a 1-input/1-output graph, got {}/{}",
@@ -83,53 +83,16 @@ impl Model {
         }
 
         // build scope, initializers + input
-        // TODO: scope keeps growing
+        // TODO: this keeps growing
         let mut scope: HashMap<&str, Tensor> =
             HashMap::with_capacity(self.initializers.len() + 1 + self.nodes.len() * 2);
         for t in self.initializers.iter() {
             scope.insert(t.name.as_ref(), t.clone());
         }
-        scope.insert(self.inputs[0].name.as_ref(), data.clone());
+        scope.insert(self.inputs[0].name.as_ref(), data);
 
         // walk the graph in topological order
-        let mut output_declared: Vec<&str> = Vec::with_capacity(self.nodes.len() * 2);
-        for node in self.nodes.iter() {
-            // collect inputs first (avoids borrow conflict when inserting outputs)
-            let mut inputs: Vec<Option<&Tensor>> = Vec::with_capacity(node.inputs.len());
-            for name in node.inputs.iter() {
-                if name.is_empty() {
-                    inputs.push(None);
-                    continue;
-                }
-                let t = scope
-                    .get(name.as_str())
-                    .ok_or_else(|| anyhow!("{}: input '{}' is not in scope", node.name(), name))?;
-                inputs.push(Some(t));
-            }
-            output_declared.clear(); // reuse buffer
-            for name in node.outputs.iter() {
-                if !name.is_empty() {
-                    output_declared.push(name.as_str());
-                }
-            }
-            if output_declared.is_empty() {
-                return Err(anyhow!("{}: node has zero non-empty outputs", node.name()));
-            }
-            let output_tensor = node.op.compute(&output_declared, &inputs, &node.attrs)?;
-            if output_tensor.len() != output_declared.len() {
-                return Err(anyhow!(
-                    "{}: operator '{:?}' produced {} outputs, declared {}",
-                    node.name(),
-                    node.op,
-                    output_tensor.len(),
-                    output_declared.len()
-                ));
-            }
-            // bind to scope for next nodes to consume
-            for (name, out) in output_declared.iter().zip(output_tensor) {
-                scope.insert(name, out);
-            }
-        }
+        Self::run_impl(&mut scope, &self.nodes)?;
 
         let Some(t) = scope.get(self.outputs[0].name.as_ref()) else {
             return Err(anyhow!(
@@ -148,8 +111,9 @@ impl Model {
         Ok(t.clone())
     }
     /// Run graph with the given feed of input tensors, returning the output tensors
-    pub fn run(&self, feed: &HashMap<String, Tensor>) -> Result<Vec<Tensor>> {
-        // validate feed, every declared input is provided, and no extra inputs are given
+    pub fn run(&self, feed: HashMap<&str, Tensor>) -> Result<Vec<Tensor>> {
+        // validate feed, every declared input is provided,
+        // and no extra inputs are given
         for spec in self.inputs.iter() {
             let Some(t) = feed.get(spec.name.as_ref()) else {
                 return Err(anyhow!("feed: missing input '{}'", spec.name));
@@ -164,64 +128,23 @@ impl Model {
             }
         }
         for name in feed.keys() {
-            if !self.inputs.iter().any(|s| s.name.as_ref() == name) {
+            if !self.inputs.iter().any(|s| s.name.as_ref() == *name) {
                 return Err(anyhow!("feed: unexpected input '{name}'"));
             }
         }
 
         // build scope, initializers + feed
-        // pre-size scope to avoid rehashing; initializers + feed entries
         let mut scope: HashMap<&str, Tensor> =
             HashMap::with_capacity(self.initializers.len() + feed.len() + self.nodes.len() * 2);
         for t in self.initializers.iter() {
             scope.insert(t.name.as_ref(), t.clone());
         }
         for (name, t) in feed {
-            scope.insert(name.as_str(), t.clone());
+            scope.insert(name, t);
         }
 
-        // walk the graph in topological order,
-        // compute each node's output(s) and bind them to scope
-        let mut output_declared: Vec<&str> = Vec::with_capacity(4);
-        for node in self.nodes.iter() {
-            // collect inputs first (avoids borrow conflict when inserting outputs)
-            let mut inputs: Vec<Option<&Tensor>> = Vec::with_capacity(node.inputs.len());
-            for name in node.inputs.iter() {
-                if name.is_empty() {
-                    inputs.push(None);
-                    continue;
-                }
-                let t = scope
-                    .get(name.as_str())
-                    .ok_or_else(|| anyhow!("{}: input '{}' is not in scope", node.name(), name))?;
-                inputs.push(Some(t));
-            }
-            output_declared.clear(); // reuse buffer
-
-            // fill in output_declared with non-empty output names
-            for name in node.outputs.iter() {
-                if !name.is_empty() {
-                    output_declared.push(name.as_str());
-                }
-            }
-            if output_declared.is_empty() {
-                return Err(anyhow!("{}: node has zero non-empty outputs", node.name()));
-            }
-            let output_tensor = node.op.compute(&output_declared, &inputs, &node.attrs)?;
-            if output_tensor.len() != output_declared.len() {
-                return Err(anyhow!(
-                    "{}: operator '{:?}' produced {} outputs, declared {}",
-                    node.name(),
-                    node.op,
-                    output_tensor.len(),
-                    output_declared.len()
-                ));
-            }
-            // bind outputs to scope for next nodes to consume
-            for (name, out) in output_declared.iter().zip(output_tensor) {
-                scope.insert(name, out);
-            }
-        }
+        // walk the graph in topological order
+        Self::run_impl(&mut scope, &self.nodes)?;
 
         // graph is done, collect outputs from scope
         let mut produced = Vec::with_capacity(self.outputs.len());
@@ -264,6 +187,53 @@ impl Model {
     /// Get the operators used in the model in topological order (deduplicated)
     pub fn operators(&self) -> &[String] {
         &self.operators
+    }
+
+    #[inline]
+    fn run_impl<'s>(scope: &mut HashMap<&'s str, Tensor>, nodes: &'s [Node]) -> Result<()> {
+        // walk the graph in topological order,
+        // compute each node's output(s) and bind them to scope
+        let mut output_declared: Vec<&str> = Vec::with_capacity(4);
+        for node in nodes {
+            // collect inputs first, avoids borrow conflict when inserting outputs
+            let mut inputs: Vec<Option<&Tensor>> = Vec::with_capacity(node.inputs.len());
+            for name in node.inputs.iter() {
+                if name.is_empty() {
+                    inputs.push(None);
+                    continue;
+                }
+                let t = scope
+                    .get(name.as_str())
+                    .ok_or_else(|| anyhow!("{}: input '{}' is not in scope", node.name(), name))?;
+                inputs.push(Some(t));
+            }
+            output_declared.clear(); // reuse buffer
+
+            // fill in output_declared with non-empty output names
+            for name in node.outputs.iter() {
+                if !name.is_empty() {
+                    output_declared.push(name.as_str());
+                }
+            }
+            if output_declared.is_empty() {
+                return Err(anyhow!("{}: node has zero non-empty outputs", node.name()));
+            }
+            let output_tensor = node.op.compute(&output_declared, &inputs, &node.attrs)?;
+            if output_tensor.len() != output_declared.len() {
+                return Err(anyhow!(
+                    "{}: operator '{:?}' produced {} outputs, declared {}",
+                    node.name(),
+                    node.op,
+                    output_tensor.len(),
+                    output_declared.len()
+                ));
+            }
+            // bind outputs to scope for next nodes to consume
+            for (name, out) in output_declared.iter().zip(output_tensor) {
+                scope.insert(name, out);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -507,6 +477,19 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
                 np.output.len()
             ));
         }
+
+        // required inputs (first arity_in.0) must be non-empty
+        // this check is already done in kernels at runtime, they errors anyway
+        for (idx, iname) in np.input.iter().enumerate() {
+            if idx < spec.arity_in.0 && iname.is_empty() {
+                return Err(anyhow!(
+                    "{node_name}: '{}' required input #{} has empty name",
+                    op.static_str(),
+                    idx
+                ));
+            }
+        }
+
         // required outputs (first arity_out.0) must be non-empty
         // this is decoding time validation, compute() can peacefully run with strict non-empty outputs
         for (idx, oname) in np.output.iter().enumerate() {

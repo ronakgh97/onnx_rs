@@ -48,6 +48,7 @@ impl Operator {
 }
 
 // TODO: Need reference inputs/outputs for correctness testing
+// TODO: Overflow & underflow bugs are hiding in plane sight
 
 fn clip(output: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
     let x = take_tensor(inputs, 0, "Clip")?;
@@ -309,13 +310,21 @@ fn depth_to_space(
         dims[2] as usize,
         dims[3] as usize,
     ];
-    if cin % (blocksize * blocksize) != 0 {
+
+    let blockwise_sq = blocksize.checked_mul(blocksize).ok_or_else(|| {
+        anyhow!(
+            "DepthToSpace: blocksize {} is too large, would overflow",
+            blocksize
+        )
+    })?;
+
+    if cin % blockwise_sq != 0 {
         return Err(anyhow!(
             "DepthToSpace: channels {cin} are not divisible by blocksize^2({})",
             blocksize * blocksize
         ));
     }
-    let co = cin / (blocksize * blocksize); // output channels
+    let co = cin / (blockwise_sq); // output channels
     let (oh, ow) = (h * blocksize, w * blocksize); //  output height and width
 
     let mut data = vec![0f32; x.data.len()];
@@ -328,7 +337,7 @@ fn depth_to_space(
                     let ci = if is_default {
                         (i * blocksize + j) * co + c
                     } else {
-                        c * blocksize * blocksize + i * blocksize + j
+                        c * blockwise_sq + i * blocksize + j
                     };
                     for hi in 0..h {
                         let src = &x.data[((n * cin + ci) * h + hi) * w..][..w];
@@ -385,7 +394,7 @@ fn conv(
 
     let [sh, sw] = take_attr_i64s_n::<2>(attrs, "strides")?.unwrap_or([1, 1]);
     let [dh, dw] = take_attr_i64s_n::<2>(attrs, "dilations")?.unwrap_or([1, 1]);
-    if sh < 0 || sw < 0 || dh < 0 || dw < 0 {
+    if sh <= 0 || sw <= 0 || dh <= 0 || dw <= 0 {
         return Err(anyhow!("Conv: strides/dilations must be positive"));
     }
     let [sh, sw, dh, dw] = [sh as usize, sw as usize, dh as usize, dw as usize];

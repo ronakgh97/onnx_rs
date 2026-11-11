@@ -17,6 +17,7 @@ path = "src/lib.rs"
 [profile.release]
 opt-level = 3
 codegen-units = 24
+incremental = true
 lto = "fat"
 debug = false
 

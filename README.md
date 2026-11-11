@@ -10,7 +10,8 @@ Notes:
 - Operators correctness tests are covered yet, so expect some undesired behaviors/outputs on sophisticated operators
   used by the model
 
-> The goal is that "`If model passes the checks during loading, it should run without any silent errors or corruption`"
+> The goal is that:
+> "`If model passes the checks during loading, it should run without any silent errors or corrupted outputs`"
 
 Benchmarks and correctness (running [srgan](https://aihub.qualcomm.com/compute/models/srgan), 1.55M params):
 
