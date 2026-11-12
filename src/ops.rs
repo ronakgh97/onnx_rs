@@ -111,7 +111,7 @@ pub enum Operator {
     Clip, Relu, PRelu,  DepthToSpace,
     Conv, Gemm, MatMul, MaxPool,
     AveragePool, Sigmoid, Flatten, Transpose,
-    Softmax, Add, Sub, Mul, Div,
+    Softmax, Add, Sub, Mul, Div, Concat,
 
 }
 
@@ -132,6 +132,7 @@ impl Operator {
             Operator::Conv => "Conv", Operator::Gemm => "Gemm", Operator::MatMul => "MatMul", Operator::MaxPool => "MaxPool",
             Operator::AveragePool => "AveragePool", Operator::Sigmoid => "Sigmoid", Operator::Flatten => "Flatten", Operator::Transpose => "Transpose",
             Operator::Softmax => "Softmax", Operator::Add => "Add", Operator::Sub => "Sub", Operator::Mul => "Mul", Operator::Div => "Div",
+            Operator::Concat => "Concat",
         }
     }
 
@@ -143,6 +144,7 @@ impl Operator {
             "Conv" => Operator::Conv, "Gemm" => Operator::Gemm, "MatMul" => Operator::MatMul, "MaxPool" => Operator::MaxPool,
             "AveragePool" => Operator::AveragePool, "Sigmoid" => Operator::Sigmoid, "Flatten" => Operator::Flatten, "Transpose" => Operator::Transpose,
             "Softmax" => Operator::Softmax, "Add" => Operator::Add, "Sub" => Operator::Sub, "Mul" => Operator::Mul, "Div" => Operator::Div,
+            "Concat" => Operator::Concat,
             _ => return None,
         };
         Some(op)
@@ -282,6 +284,12 @@ impl Operator {
                 arity_in: (2, 2),
                 arity_out: (1, 1),
                 attrs: &[("allowzero", AttributesDataKind::I64)],
+            },
+            Operator::Concat => OperatorSpec {
+                min_opset: 4,
+                arity_in: (1, 64),
+                arity_out: (1, 1),
+                attrs: &[("axis", AttributesDataKind::I64)],
             },
         }
     }

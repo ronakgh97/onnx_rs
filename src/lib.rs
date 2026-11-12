@@ -50,8 +50,7 @@ pub struct Model {
     opset: i64,                  // for compatibility check
     nodes: Arc<[Node]>,          // all nodes in the graph, in topological order
     operators: Arc<[String]>, // all the operators used in the graph, in topological order (deduped)
-    initializers: Arc<[Tensor]>, // weights and biases
-    constants: Arc<[Tensor]>, // tensors folded from 'Constant' nodes, act like initializers
+    initializers: Arc<[Tensor]>, // all weights and biases
     inputs: Arc<[TensorSpec]>, // all the inputs that the graph expects, with their names and shapes
     outputs: Arc<[TensorSpec]>, // all the outputs that the graph produces, with their names and shapes
 }
@@ -85,13 +84,9 @@ impl Model {
 
         // build scope, initializers + constants + input
         // TODO: this keeps growing
-        let mut scope: HashMap<&str, Tensor> = HashMap::with_capacity(
-            self.initializers.len() + self.constants.len() + self.nodes.len() * 2,
-        );
+        let mut scope: HashMap<&str, Tensor> =
+            HashMap::with_capacity(self.initializers.len() + self.nodes.len() * 2);
         for t in self.initializers.iter() {
-            scope.insert(t.name.as_ref(), t.clone());
-        }
-        for t in self.constants.iter() {
             scope.insert(t.name.as_ref(), t.clone());
         }
         scope.insert(self.inputs[0].name.as_ref(), data);
@@ -139,13 +134,9 @@ impl Model {
         }
 
         // build scope, initializers + constants + feed
-        let mut scope: HashMap<&str, Tensor> = HashMap::with_capacity(
-            self.initializers.len() + self.constants.len() + feed.len() + self.nodes.len() * 2,
-        );
+        let mut scope: HashMap<&str, Tensor> =
+            HashMap::with_capacity(self.initializers.len() + feed.len() + self.nodes.len() * 2);
         for t in self.initializers.iter() {
-            scope.insert(t.name.as_ref(), t.clone());
-        }
-        for t in self.constants.iter() {
             scope.insert(t.name.as_ref(), t.clone());
         }
         for (name, t) in feed {
@@ -364,7 +355,6 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
 
     // validate & collect graph execution nodes and their operators
     let mut nodes: Vec<Node> = Vec::with_capacity(graph.node.len());
-    let mut constants: Vec<Tensor> = Vec::with_capacity(graph.node.len());
     for (i, np) in graph.node.iter().enumerate() {
         let node_name = if np.name.is_empty() {
             // don't error on empty name, onnx allows optional node names
@@ -420,7 +410,7 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
                     "{node_name}: output '{out_name}' reuses an initializer or graph input name"
                 ));
             }
-            constants.push(tensor);
+            initializers.push(tensor);
             continue;
         }
 
@@ -599,7 +589,6 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
         nodes: Arc::from(nodes),
         operators: Arc::from(operators),
         initializers: Arc::from(initializers),
-        constants: Arc::from(constants),
         inputs: Arc::from(inputs),
         outputs: Arc::from(outputs),
     })
