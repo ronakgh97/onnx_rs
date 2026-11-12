@@ -13,9 +13,18 @@ Notes:
 > The goal is that:
 > "`If model passes the checks during loading, it should run without any silent errors or corrupted outputs`"
 
-Benchmarks and correctness (running [srgan](https://aihub.qualcomm.com/compute/models/srgan), 1.55M params):
+Benchmarks and correctness:
 
-| Runtime | Time     | Input                                     | Output                                        |
-|---------|----------|-------------------------------------------|-----------------------------------------------|
-| ONNX_RS | 6.11s    | <img src="images/sample.png" width="512"> | <img src="images/onnx_rs_x4.png" width="512"> |
-| ORT     | 248.34ms | <img src="images/sample.png" width="512"> | <img src="images/ort_x4.png" width="512">     |
+Running [SRGAN](https://aihub.qualcomm.com/compute/models/srgan) 5.92 MB
+
+| Runtime | Time     | Input                                       | Output                                              |
+|---------|----------|---------------------------------------------|-----------------------------------------------------|
+| ONNX_RS | 6.54s    | <img src="images/sample_1.png" width="512"> | <img src="images/srgan_onnx_rs_x4.png" width="512"> |
+| ORT     | 316.34ms | <img src="images/sample_1.png" width="512"> | <img src="images/srgan_ort_x4.png" width="512">     |
+
+Running [4xPurePhoto-Span](https://openmodeldb.info/models/4x-PurePhoto-span) 1.72 MB
+
+| Runtime | Time     | Input                                       | Output                                                       |
+|---------|----------|---------------------------------------------|--------------------------------------------------------------|
+| ONNX_RS | 814.22ms | <img src="images/sample_2.png" width="512"> | <img src="images/purephoto_span_onnx_rs_x4.png" width="512"> |
+| ORT     | 100.29ms  | <img src="images/sample_2.png" width="512"> | <img src="images/purephoto_span_ort_x4.png" width="512">     |
