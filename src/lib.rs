@@ -8,7 +8,7 @@ pub use crate::tensor::{Tensor, TensorSpec};
 
 use crate::ops::AttributesDataKind;
 use crate::ops::{AttributesDataValue, Operator};
-use crate::proto::{ModelProto, ValueInfoProto};
+use crate::proto::{ModelProto, TensorProto, ValueInfoProto};
 use anyhow::{Result, anyhow};
 use prost::Message;
 use std::collections::{HashMap, HashSet};
@@ -51,6 +51,7 @@ pub struct Model {
     nodes: Arc<[Node]>,          // all nodes in the graph, in topological order
     operators: Arc<[String]>, // all the operators used in the graph, in topological order (deduped)
     initializers: Arc<[Tensor]>, // weights and biases
+    constants: Arc<[Tensor]>, // tensors folded from 'Constant' nodes, act like initializers
     inputs: Arc<[TensorSpec]>, // all the inputs that the graph expects, with their names and shapes
     outputs: Arc<[TensorSpec]>, // all the outputs that the graph produces, with their names and shapes
 }
@@ -82,11 +83,15 @@ impl Model {
             ));
         }
 
-        // build scope, initializers + input
+        // build scope, initializers + constants + input
         // TODO: this keeps growing
-        let mut scope: HashMap<&str, Tensor> =
-            HashMap::with_capacity(self.initializers.len() + 1 + self.nodes.len() * 2);
+        let mut scope: HashMap<&str, Tensor> = HashMap::with_capacity(
+            self.initializers.len() + self.constants.len() + self.nodes.len() * 2,
+        );
         for t in self.initializers.iter() {
+            scope.insert(t.name.as_ref(), t.clone());
+        }
+        for t in self.constants.iter() {
             scope.insert(t.name.as_ref(), t.clone());
         }
         scope.insert(self.inputs[0].name.as_ref(), data);
@@ -133,10 +138,14 @@ impl Model {
             }
         }
 
-        // build scope, initializers + feed
-        let mut scope: HashMap<&str, Tensor> =
-            HashMap::with_capacity(self.initializers.len() + feed.len() + self.nodes.len() * 2);
+        // build scope, initializers + constants + feed
+        let mut scope: HashMap<&str, Tensor> = HashMap::with_capacity(
+            self.initializers.len() + self.constants.len() + feed.len() + self.nodes.len() * 2,
+        );
         for t in self.initializers.iter() {
+            scope.insert(t.name.as_ref(), t.clone());
+        }
+        for t in self.constants.iter() {
             scope.insert(t.name.as_ref(), t.clone());
         }
         for (name, t) in feed {
@@ -302,97 +311,8 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
         if !init_names.insert(tensor.name.clone()) {
             return Err(anyhow!("initializer: '{}' is a duplicate", tensor.name));
         }
-        // initializer must be f32 only
-        if tensor.data_type != 1 {
-            return Err(anyhow!(
-                "initializer: '{}' must be f32 dtype, got {}",
-                tensor.name,
-                dtype_name(tensor.data_type)
-            ));
-        }
 
-        // check negative dim & numel overflows
-        let mut numel: u64 = 1;
-        for (di, &d) in tensor.dims.iter().enumerate() {
-            if d < 0 {
-                return Err(anyhow!(
-                    "initializer: '{}' encountered negative dim value: {d} at index dim[{di}]",
-                    tensor.name
-                ));
-            }
-            numel = numel.checked_mul(d as u64).ok_or_else(|| {
-                anyhow!("initializer: '{}' num of elements overflows", tensor.name)
-            })?;
-        }
-
-        // allow empty tensors, for god’s sake,
-        // if this creating bad cases to handle, I will lose my shit
-        if numel == 0 {
-            defined.insert(tensor.name.clone());
-            initializers.push(Tensor::create(&tensor.name, &tensor.dims, &[])?);
-            continue;
-        }
-
-        // collect storage field sources
-        let sources: u64 = [
-            !tensor.raw_data.is_empty(),
-            !tensor.float_data.is_empty(),
-            !tensor.int32_data.is_empty(),
-            !tensor.int64_data.is_empty(),
-        ]
-        .into_iter()
-        .map(|b| b as u64)
-        .sum();
-
-        // initializer must have exactly one storage field
-        match sources {
-            0 => {
-                return Err(anyhow!(
-                    "initializer: '{}' {numel} elements, but no data, external storage is not supported",
-                    tensor.name
-                ));
-            }
-            1 => {}
-            _ => {
-                return Err(anyhow!(
-                    "initializer: '{}' more than one storage field",
-                    tensor.name
-                ));
-            }
-        }
-
-        // initializer must not have int32/int64 data
-        if !tensor.int32_data.is_empty() || !tensor.int64_data.is_empty() {
-            return Err(anyhow!(
-                "initializer: '{}' data in int32/int64 field, only f32 is supported",
-                tensor.name
-            ));
-        }
-
-        // create tensor from raw data, if available
-        let tensor = if !tensor.raw_data.is_empty() {
-            let expected_size = numel
-                .checked_mul(4)
-                .ok_or_else(|| anyhow!("initializer: '{}' byte size overflows", tensor.name))?;
-            if tensor.raw_data.len() as u64 != expected_size {
-                return Err(anyhow!(
-                    "initializer: '{}' found {} bytes, tensor shape needs {expected_size}",
-                    tensor.name,
-                    tensor.raw_data.len()
-                ));
-            }
-            Tensor::create(&tensor.name, &tensor.dims, &bytes_to_f32(&tensor.raw_data)?)?
-        } else {
-            if tensor.float_data.len() as u64 != numel {
-                return Err(anyhow!(
-                    "initializer: '{}' found {} f32 values, shape needs {numel}",
-                    tensor.name,
-                    tensor.float_data.len()
-                ));
-            }
-            Tensor::create(&tensor.name, &tensor.dims, &tensor.float_data)?
-        };
-
+        let tensor = read_tensor(tensor, "initializer", &tensor.name)?;
         defined.insert(tensor.name.to_string());
         initializers.push(tensor);
     }
@@ -434,6 +354,7 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
 
     // validate & collect graph nodes
     let mut nodes: Vec<Node> = Vec::with_capacity(graph.node.len());
+    let mut constants: Vec<Tensor> = Vec::with_capacity(graph.node.len());
     for (i, np) in graph.node.iter().enumerate() {
         let node_name = if np.name.is_empty() {
             // don't error on empty name, onnx allows optional node names
@@ -443,12 +364,58 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
             np.name.clone()
         };
 
-        let Some(op) = Operator::lookup(&np.op_type) else {
-            return Err(anyhow!("{node_name}: op '{}' is not supported", np.op_type));
-        };
         if !np.domain.is_empty() && np.domain != "ai.onnx" {
             return Err(anyhow!("{node_name}: domain '{}' not core", np.domain));
         }
+
+        // 'Constant' nodes carry a TENSOR attribute, which the
+        // operator/attribute system does not model,
+        // semantically they are graph initializers that
+        // happen to be spelled as nodes, so fold them into the
+        // scope at decode time and drop the node entirely
+        if np.op_type == "Constant" {
+            if !np.input.is_empty() {
+                return Err(anyhow!("{node_name}: Constant must have no inputs"));
+            }
+
+            let out_name = if let Some(output) = np.output.first() {
+                if output.is_empty() {
+                    return Err(anyhow!(
+                        "{node_name}: Constant must have a non-empty output name"
+                    ));
+                }
+                output
+            } else {
+                return Err(anyhow!(
+                    "{node_name}: Constant must have exactly one non-empty output"
+                ));
+            };
+
+            // only support tensor value
+            let Some(attr) = np.attribute.iter().find(|a| a.name == "value") else {
+                return Err(anyhow!(
+                    "{node_name}: Constant requires a 'value' attribute"
+                ));
+            };
+            let Some(tp) = attr.t.as_ref() else {
+                return Err(anyhow!(
+                    "{node_name}: Constant 'value' must be a tensor attribute"
+                ));
+            };
+
+            let tensor = read_tensor(tp, "Constant", out_name)?;
+            if !defined.insert(out_name.clone()) {
+                return Err(anyhow!(
+                    "{node_name}: output '{out_name}' reuses an initializer or graph input name"
+                ));
+            }
+            constants.push(tensor);
+            continue;
+        }
+
+        let Some(op) = Operator::lookup(&np.op_type) else {
+            return Err(anyhow!("{node_name}: op '{}' is not supported", np.op_type));
+        };
         let spec = op.spec();
         if opset < spec.min_opset {
             return Err(anyhow!(
@@ -600,7 +567,6 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
     }
 
     let mut dedup_set = HashSet::with_capacity(nodes.len());
-
     let operators: Vec<String> = nodes
         .iter()
         .filter_map(|node| {
@@ -616,31 +582,111 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
         nodes: Arc::from(nodes),
         operators: Arc::from(operators),
         initializers: Arc::from(initializers),
+        constants: Arc::from(constants),
         inputs: Arc::from(inputs),
         outputs: Arc::from(outputs),
     })
 }
 
 #[inline]
-fn read_tensor_spec(value_proto: &ValueInfoProto, field: &str) -> Result<TensorSpec> {
-    let name = value_proto.name.as_str();
-    let Some(tt) = value_proto
-        .type_
-        .as_ref()
-        .and_then(|t| t.tensor_type.as_ref())
-    else {
-        return Err(anyhow!("{field} '{name}': no tensor type declared"));
+fn read_tensor(proto: &TensorProto, kind: &str, name: &str) -> Result<Tensor> {
+    // only support f32 dtype
+    if proto.data_type != 1 {
+        return Err(anyhow!(
+            "{kind}: '{name}' must be f32 dtype, got {}",
+            dtype_name(proto.data_type)
+        ));
+    }
+
+    // check negative dim & numel overflows
+    let mut numel: u64 = 1;
+    for (di, &d) in proto.dims.iter().enumerate() {
+        if d < 0 {
+            return Err(anyhow!(
+                "{kind}: '{name}' encountered negative dim value: {d} at index dim[{di}]"
+            ));
+        }
+        numel = numel
+            .checked_mul(d as u64)
+            .ok_or_else(|| anyhow!("{kind}: '{name}' num of elements overflows"))?;
+    }
+
+    // allow empty tensors, for god’s sake,
+    // if this creating bad cases to handle, I will lose my shit
+    if numel == 0 {
+        return Tensor::create(name, &proto.dims, &[]);
+    }
+
+    // collect storage field sources
+    let sources: u64 = [
+        !proto.raw_data.is_empty(),
+        !proto.float_data.is_empty(),
+        !proto.int32_data.is_empty(),
+        !proto.int64_data.is_empty(),
+    ]
+    .into_iter()
+    .map(|b| b as u64)
+    .sum();
+
+    // must have exactly one storage field
+    match sources {
+        0 => {
+            return Err(anyhow!(
+                "{kind}: '{name}' {numel} elements, but no data, external storage is not supported"
+            ));
+        }
+        1 => {}
+        _ => {
+            return Err(anyhow!("{kind}: '{name}' more than one storage field"));
+        }
+    }
+
+    // must not have int32/int64 data
+    if !proto.int32_data.is_empty() || !proto.int64_data.is_empty() {
+        return Err(anyhow!(
+            "{kind}: '{name}' data in int32/int64 field, only f32 is supported"
+        ));
+    }
+
+    // create tensor from raw data, if available
+    if !proto.raw_data.is_empty() {
+        let expected_size = numel
+            .checked_mul(4)
+            .ok_or_else(|| anyhow!("{kind}: '{name}' byte size overflows"))?;
+        if proto.raw_data.len() as u64 != expected_size {
+            return Err(anyhow!(
+                "{kind}: '{name}' found {} bytes, tensor shape needs {expected_size}",
+                proto.raw_data.len()
+            ));
+        }
+        Tensor::create(name, &proto.dims, &bytes_to_f32(&proto.raw_data)?)
+    } else {
+        if proto.float_data.len() as u64 != numel {
+            return Err(anyhow!(
+                "{kind}: '{name}' found {} f32 values, shape needs {numel}",
+                proto.float_data.len()
+            ));
+        }
+        Tensor::create(name, &proto.dims, &proto.float_data)
+    }
+}
+
+#[inline]
+fn read_tensor_spec(proto: &ValueInfoProto, kind: &str) -> Result<TensorSpec> {
+    let name = proto.name.as_str();
+    let Some(tt) = proto.type_.as_ref().and_then(|t| t.tensor_type.as_ref()) else {
+        return Err(anyhow!("{kind} '{name}': no tensor type declared"));
     };
     // proto_code for f32 is 1
     if tt.elem_type != 1 {
         return Err(anyhow!(
-            "{field} '{name}': {}, only f32 is supported",
+            "{kind} '{name}': {}, only f32 is supported",
             dtype_name(tt.elem_type)
         ));
     }
     let Some(shape) = &tt.shape else {
         return Err(anyhow!(
-            "{field} '{name}': no shape declared, concrete shapes required"
+            "{kind} '{name}': no shape declared, concrete shapes required"
         ));
     };
     // TODO; handle symbolic dims, for now require concrete shapes
@@ -654,12 +700,12 @@ fn read_tensor_spec(value_proto: &ValueInfoProto, field: &str) -> Result<TensorS
             Some(v) if *v >= 0 => dims.push(*v),
             Some(v) => {
                 return Err(anyhow!(
-                    "{field} '{name}': encountered negative dim value: {v} at index dim[{di}]"
+                    "{kind} '{name}': encountered negative dim value: {v} at index dim[{di}]"
                 ));
             }
             None => {
                 return Err(anyhow!(
-                    "{field} '{name}': encountered symbolic dim at index dim[{di}], concrete shapes required"
+                    "{kind} '{name}': encountered symbolic dim at index dim[{di}], concrete shapes required"
                 ));
             }
         }
