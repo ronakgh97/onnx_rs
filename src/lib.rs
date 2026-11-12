@@ -227,6 +227,12 @@ impl Model {
             if output_declared.is_empty() {
                 return Err(anyhow!("{}: node has zero non-empty outputs", node.name()));
             }
+            // dbg!(
+            //     "executing node",
+            //     node.name(),
+            //     node.op(),
+            //     node.inputs_outputs(),
+            // );
             let output_tensor = node.op.compute(&output_declared, &inputs, &node.attrs)?;
             if output_tensor.len() != output_declared.len() {
                 return Err(anyhow!(
@@ -299,11 +305,12 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
         return Err(anyhow!("graph missing from model"));
     };
 
+    // initialize scope tracking structures
     let mut defined: HashSet<String> = HashSet::with_capacity(64);
     let mut producers: HashMap<String, usize> = HashMap::with_capacity(64);
-
     let mut init_names: HashSet<String> = HashSet::with_capacity(64);
     let mut initializers: Vec<Tensor> = Vec::with_capacity(graph.initializer.len());
+
     for (i, tensor) in graph.initializer.iter().enumerate() {
         if tensor.name.is_empty() {
             return Err(anyhow!("initializer #{i} has no name"));
@@ -312,6 +319,7 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
             return Err(anyhow!("initializer: '{}' is a duplicate", tensor.name));
         }
 
+        // validate & collect initializer into scope, they are available to all nodes
         let tensor = read_tensor(tensor, "initializer", &tensor.name)?;
         defined.insert(tensor.name.to_string());
         initializers.push(tensor);
@@ -331,6 +339,7 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
             }
             continue;
         }
+        // validate tensor spec, and add to graph inputs
         let value = read_tensor_spec(vi, "graph input")?;
         if !defined.insert(value.name.to_string()) {
             return Err(anyhow!("graph input '{}': duplicate name", vi.name));
@@ -348,11 +357,12 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
         if !output_names.insert(vo.name.clone()) {
             return Err(anyhow!("graph output '{}': duplicate name", vo.name));
         }
+        // validate tensor spec, and add to graph outputs
         let value = read_tensor_spec(vo, "graph output")?;
         outputs.push(value);
     }
 
-    // validate & collect graph nodes
+    // validate & collect graph execution nodes and their operators
     let mut nodes: Vec<Node> = Vec::with_capacity(graph.node.len());
     let mut constants: Vec<Tensor> = Vec::with_capacity(graph.node.len());
     for (i, np) in graph.node.iter().enumerate() {
@@ -403,6 +413,7 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
                 ));
             };
 
+            // read constant tensor, add to initializers, and mark as defined in scope
             let tensor = read_tensor(tp, "Constant", out_name)?;
             if !defined.insert(out_name.clone()) {
                 return Err(anyhow!(
@@ -413,6 +424,7 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
             continue;
         }
 
+        // check supported operator from our runtime
         let Some(op) = Operator::lookup(&np.op_type) else {
             return Err(anyhow!("{node_name}: op '{}' is not supported", np.op_type));
         };
@@ -514,6 +526,8 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
             attrs.push((name.to_string(), attr));
         }
 
+        // check for duplicate output names,
+        // and that they are not already defined in scope
         for oname in &np.output {
             if oname.is_empty() {
                 continue;
@@ -528,6 +542,7 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
             }
         }
 
+        // collect validate node
         nodes.push(Node {
             op,
             name: node_name,
@@ -560,12 +575,14 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
         }
     }
 
+    // check that all graph outputs are produced by some node or initializer
     for vo in &graph.output {
         if !vo.name.is_empty() && !defined.contains(vo.name.as_str()) {
             return Err(anyhow!("graph output '{}' is never produced", vo.name));
         }
     }
 
+    // collect operators used in the graph, in topological order, deduped
     let mut dedup_set = HashSet::with_capacity(nodes.len());
     let operators: Vec<String> = nodes
         .iter()
@@ -614,7 +631,7 @@ fn read_tensor(proto: &TensorProto, kind: &str, name: &str) -> Result<Tensor> {
     // allow empty tensors, for god’s sake,
     // if this creating bad cases to handle, I will lose my shit
     if numel == 0 {
-        return Tensor::create(name, &proto.dims, &[]);
+        return Tensor::create(name, &proto.dims, vec![]);
     }
 
     // collect storage field sources
@@ -659,7 +676,23 @@ fn read_tensor(proto: &TensorProto, kind: &str, name: &str) -> Result<Tensor> {
                 proto.raw_data.len()
             ));
         }
-        Tensor::create(name, &proto.dims, &bytes_to_f32(&proto.raw_data)?)
+
+        // if !proto.raw_data.len().is_multiple_of(4) {
+        //     return Err(anyhow!(
+        //         "initializer: raw_data has {} bytes, cannot be converted to f32",
+        //         proto.raw_data.len()
+        //     ));
+        // }
+
+        let (bytes_chunks, _) = proto.raw_data.as_chunks::<4>();
+        let mut data = Vec::with_capacity(bytes_chunks.len());
+        data.extend(
+            bytes_chunks
+                .iter()
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])),
+        );
+
+        Tensor::create(name, &proto.dims, data)
     } else {
         if proto.float_data.len() as u64 != numel {
             return Err(anyhow!(
@@ -667,7 +700,9 @@ fn read_tensor(proto: &TensorProto, kind: &str, name: &str) -> Result<Tensor> {
                 proto.float_data.len()
             ));
         }
-        Tensor::create(name, &proto.dims, &proto.float_data)
+        let mut data = Vec::with_capacity(proto.float_data.len());
+        data.extend(proto.float_data.iter().copied());
+        Tensor::create(name, &proto.dims, data)
     }
 }
 
@@ -716,7 +751,7 @@ fn read_tensor_spec(proto: &ValueInfoProto, kind: &str) -> Result<TensorSpec> {
     })
 }
 
-#[inline]
+#[inline(always)]
 fn dtype_name(proto_code: i32) -> &'static str {
     match proto_code {
         0 => "undefined",
@@ -740,7 +775,7 @@ fn dtype_name(proto_code: i32) -> &'static str {
     }
 }
 
-#[inline]
+#[inline(always)]
 fn atype(proto_code: i32) -> &'static str {
     match proto_code {
         1 => "f32",
@@ -751,24 +786,4 @@ fn atype(proto_code: i32) -> &'static str {
         8 => "strings", // not used, just placeholder
         _ => "unknown",
     }
-}
-
-#[inline]
-fn bytes_to_f32(bytes: &[u8]) -> Result<Vec<f32>> {
-    if !bytes.len().is_multiple_of(4) {
-        return Err(anyhow!(
-            "initializer: raw_data has {} bytes, cannot be converted to f32",
-            bytes.len()
-        ));
-    }
-
-    let (bytes_chunks, _) = bytes.as_chunks::<4>();
-    let mut floats = Vec::with_capacity(bytes_chunks.len());
-    floats.extend(
-        bytes_chunks
-            .iter()
-            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])),
-    );
-
-    Ok(floats)
 }

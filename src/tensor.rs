@@ -18,7 +18,7 @@ pub struct TensorSpec {
 }
 
 impl Tensor {
-    pub fn create(name: &str, dims: &[i64], data: &[f32]) -> Result<Self> {
+    pub fn create(name: &str, dims: &[i64], data: Vec<f32>) -> Result<Self> {
         // calculate numel with overflow checks
         let numel = dims
             .iter()
@@ -38,6 +38,21 @@ impl Tensor {
             name: Arc::from(name),
             dims: Arc::from(dims),
             data: Arc::from(data),
+        })
+    }
+    pub fn zeros(name: &str, dims: &[i64]) -> Result<Self> {
+        let numel = dims
+            .iter()
+            .try_fold(1usize, |a, &d| {
+                usize::try_from(d).ok().and_then(|d| a.checked_mul(d))
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!("Tensor '{name}': dims {dims:?} overflow element count")
+            })?;
+        Ok(Self {
+            name: Arc::from(name),
+            dims: Arc::from(dims),
+            data: Arc::from(vec![0f32; numel]),
         })
     }
     #[inline]

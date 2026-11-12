@@ -863,19 +863,18 @@ dependencies = [
 [[package]]
 name = "ort"
 version = "2.0.0-rc.15"
-source = "git+https://github.com/pykeio/ort#6ed2423cc08ca21d0b07f467b6e4387ef1bee2ce"
+source = "git+https://github.com/pykeio/ort#2fc2fc838386bc8fadb9acd54683e156d826bbcd"
 dependencies = [
  "ndarray",
  "ort-sys",
  "smallvec",
  "tracing",
- "ureq",
 ]
 
 [[package]]
 name = "ort-sys"
 version = "2.0.0-rc.15"
-source = "git+https://github.com/pykeio/ort#6ed2423cc08ca21d0b07f467b6e4387ef1bee2ce"
+source = "git+https://github.com/pykeio/ort#2fc2fc838386bc8fadb9acd54683e156d826bbcd"
 dependencies = [
  "hmac-sha256",
  "lzma-rust2",
