@@ -1,3 +1,34 @@
+//! A small, pure-Rust ONNX runtime for running supported `f32` models on
+//! x86_64 CPUs.
+//!
+//! Models are loaded from `.onnx` (must contain both graph and initializers)
+//! files or encoded bytes, validated while loading,
+//! and executed with [`Model::run`]. The public API keeps the
+//! runtime deliberately small: [`Model`] describes and runs a graph, while
+//! [`Tensor`] and [`TensorSpec`] represent its data and input/output shapes.
+//!
+//! The runtime currently supports a focused subset of ONNX operators and
+//! model shapes. Unsupported graph features are rejected instead of being
+//! silently ignored or producing undesired outputs.
+//!
+//! Comparison with [ORT](https://docs.rs/ort/latest/ort/), running [SRGAN](https://aihub.qualcomm.com/compute/models/srgan) (5.92 MB) from Qualcomm's AI Hub
+//!
+//! | Runtime | Input | Output |
+//! |---------|-------|--------|
+//! | ONNX_RS | <img src="https://raw.githubusercontent.com/ronakgh97/onnx_rs/refs/heads/master/images/sample_1.png" width="512"> | <img src="https://raw.githubusercontent.com/ronakgh97/onnx_rs/refs/heads/master/images/srgan_onnx_rs_x4.png" width="512"> |
+//! | ORT     | <img src="https://raw.githubusercontent.com/ronakgh97/onnx_rs/refs/heads/master/images/sample_1.png" width="512"> | <img src="https://raw.githubusercontent.com/ronakgh97/onnx_rs/refs/heads/master/images/srgan_ort_x4.png" width="512">     |
+//!
+//! ```no_run
+//! use onnx_rs::{Model, Tensor};
+//! fn main() {
+//!     let model = Model::from_file("path/to/model.onnx").unwrap();
+//!     let input = Tensor::create("input_name", &[1, 3, 128, 128], vec![0f32; 1*3*128*128]).unwrap();
+//!     let output = model.run_single(input).unwrap();
+//!     print!("output tensor dims: {:?}", output.dims);
+//! }
+//! ```
+//!
+
 mod kernels;
 mod ops;
 mod proto;

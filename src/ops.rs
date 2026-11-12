@@ -287,7 +287,7 @@ impl Operator {
             },
             Operator::Concat => OperatorSpec {
                 min_opset: 4,
-                arity_in: (1, 64),
+                arity_in: (1, 2147483647),
                 arity_out: (1, 1),
                 attrs: &[("axis", AttributesDataKind::I64)],
             },

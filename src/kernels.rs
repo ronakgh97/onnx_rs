@@ -736,18 +736,31 @@ fn conv(
         .checked_mul(m)
         .and_then(|t| t.checked_mul(p))
         .ok_or_else(|| anyhow!("Conv: output buffer {n}*{m}*{p} overflows"))?;
+
+    // tile over output rows so the im2col buffer stays bounded
+    // ~16 MB tile stays mostly L3-resident while the gemm reads it back
+    const COL_TILE_BUDGET: usize = 16 * 1024 * 1024;
+    let budget_f32 = COL_TILE_BUDGET / size_of::<f32>();
+
+    let tile_oh = match k_g.checked_mul(ow) {
+        Some(k_ow) => (budget_f32 / k_ow).max(1).min(oh),
+        None => 1,
+    };
+    let tile_p_max = tile_oh * ow;
+
     let col_len = k_g
-        .checked_mul(p)
-        .ok_or_else(|| anyhow!("Conv: im2col buffer {k_g}*{p} overflows"))?;
+        .checked_mul(tile_p_max)
+        .ok_or_else(|| anyhow!("Conv: im2col buffer {k_g}*{tile_p_max} overflows"))?;
     let ycm_len = m_g
-        .checked_mul(p)
-        .ok_or_else(|| anyhow!("Conv: gemm buffer {m_g}*{p} overflows"))?;
+        .checked_mul(tile_p_max)
+        .ok_or_else(|| anyhow!("Conv: gemm buffer {m_g}*{tile_p_max} overflows"))?;
 
     let mut out = vec![0f32; out_len];
 
-    // We reuse a single im2col buffer for all groups (max K per group = k_g <= k_total)
-    let mut col = vec![0f32; col_len]; // [K_g, P] column-major
-    let mut ycm = vec![0f32; ycm_len]; // [M_g, P] column-major
+    // reuse a single im2col buffer across all groups and row tiles
+    // (max K per group = k_g <= k_total, max rows per tile = tile_oh)
+    let mut col = vec![0f32; col_len]; // [K_g, P_tile] column-major
+    let mut ycm = vec![0f32; ycm_len]; // [M_g, P_tile] column-major
 
     for ni in 0..n {
         let xbase_n = ni * cin * hi * wi;
@@ -761,61 +774,68 @@ fn conv(
             let c_start = g * c_g;
             // c_end = c_start + c_g
 
-            // im2col for this group
-            let mut pcol = 0usize;
-            for ohi in 0..oh {
-                for owi in 0..ow {
-                    let coloff = pcol * k_g;
-                    for ci in 0..c_g {
-                        let rowoff = coloff + ci * kh * kw;
-                        let xchan = xbase_n + (c_start + ci) * hi * wi;
-                        for khi in 0..kh {
-                            let ih = ohi * sh + khi * dh;
-                            let ih = ih as i64 - pt as i64;
-                            if !(0..hi as i64).contains(&ih) {
-                                continue;
-                            }
-                            for kwi in 0..kw {
-                                let iw = owi * sw + kwi * dw;
-                                let iw = iw as i64 - pl as i64;
-                                if !(0..wi as i64).contains(&iw) {
-                                    continue;
+            // tile over output rows, the im2col buffer is reused across tiles, so
+            // padding positions must be written as explicit zeros, cuz skipping them
+            // would leave the previous tile's values in place
+            for tile in (0..oh).step_by(tile_oh) {
+                let oh_end = (tile + tile_oh).min(oh);
+                let p_tile = (oh_end - tile) * ow;
+
+                // im2col for this group + row band
+                let mut pcol = 0usize;
+                for ohi in tile..oh_end {
+                    for owi in 0..ow {
+                        let coloff = pcol * k_g;
+                        for ci in 0..c_g {
+                            let rowoff = coloff + ci * kh * kw;
+                            let xchan = xbase_n + (c_start + ci) * hi * wi;
+                            for khi in 0..kh {
+                                let ih = ohi * sh + khi * dh;
+                                let ih = ih as i64 - pt as i64;
+                                let hpad = !(0..hi as i64).contains(&ih);
+                                for kwi in 0..kw {
+                                    let iw = owi * sw + kwi * dw;
+                                    let iw = iw as i64 - pl as i64;
+                                    let idx = rowoff + khi * kw + kwi;
+                                    if hpad || !(0..wi as i64).contains(&iw) {
+                                        col[idx] = 0.0;
+                                    } else {
+                                        col[idx] = x.data[xchan + ih as usize * wi + iw as usize];
+                                    }
                                 }
-                                col[rowoff + khi * kw + kwi] =
-                                    x.data[xchan + ih as usize * wi + iw as usize];
                             }
                         }
+                        pcol += 1;
                     }
-                    pcol += 1;
                 }
-            }
 
-            // gemm: Wg^T[M_g, K_g] · col[K_g, P] = Yg[M_g, P]
-            // Wg is row-major [M_g, K_g] -> treat as col-major [K_g, M_g] with trans_a
-            lvl3::gemm(
-                m_g,
-                p,
-                k_g,
-                1.0,
-                wg,
-                k_g, // lda = K_g for trans_a
-                col.as_slice(),
-                k_g,
-                0.0,
-                ycm.as_mut_slice(),
-                m_g,
-                true,
-                false,
-            );
+                // gemm: Wg^T[M_g, K_g] · col[K_g, P_tile] = Yg[M_g, P_tile]
+                // Wg is row-major [M_g, K_g] -> treat as col-major [K_g, M_g] with trans_a
+                lvl3::gemm(
+                    m_g,
+                    p_tile,
+                    k_g,
+                    1.0,
+                    wg,
+                    k_g, // lda = K_g for trans_a
+                    &col[..k_g * p_tile],
+                    k_g,
+                    0.0,
+                    &mut ycm[..m_g * p_tile],
+                    m_g,
+                    true,
+                    false,
+                );
 
-            // scatter + bias
-            let bias_g = bias.map(|b| &b[g * m_g..(g + 1) * m_g]);
-            let outbase_g = ni * m * p + g * m_g * p;
-            for mi in 0..m_g {
-                let add = bias_g.map_or(0.0, |b| b[mi]);
-                for j in 0..p {
-                    let (ohi, owi) = (j / ow, j % ow);
-                    out[outbase_g + (mi * oh + ohi) * ow + owi] = ycm[j * m_g + mi] + add;
+                // scatter + bias
+                let bias_g = bias.map(|b| &b[g * m_g..(g + 1) * m_g]);
+                let outbase_g = ni * m * p + g * m_g * p;
+                for mi in 0..m_g {
+                    let add = bias_g.map_or(0.0, |b| b[mi]);
+                    for j in 0..p_tile {
+                        let (ohi, owi) = (tile + j / ow, j % ow);
+                        out[outbase_g + (mi * oh + ohi) * ow + owi] = ycm[j * m_g + mi] + add;
+                    }
                 }
             }
         }
