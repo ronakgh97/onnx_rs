@@ -24,7 +24,7 @@ debug = false
 [dependencies]
 prost = "0.14.6"
 anyhow = "1.0.104"
-blas-rs = "1.1.0-alpha.3"
+blas-rs = { git = "https://github.com/ronakgh97/blas-rs" }
 
 [dev-dependencies]
 ort = { git = "https://github.com/pykeio/ort" }

@@ -149,8 +149,7 @@ dependencies = [
 [[package]]
 name = "blas-rs"
 version = "1.1.0-alpha.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eb6eaa3f20dd7eec5d37787fd3ed21d2ee6659168f0658c68da3fe2eb055b52c"
+source = "git+https://github.com/ronakgh97/blas-rs#f8ee83f3062265c8df0d8e6a665b664cce08fe03"
 dependencies = [
  "rand 0.10.3",
  "rayon",

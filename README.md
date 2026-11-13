@@ -15,7 +15,7 @@ Notes:
 
 Benchmarks and correctness:
 
-Running [SRGAN](https://aihub.qualcomm.com/compute/models/srgan) 5.92 MB
+Running [Srgan](https://aihub.qualcomm.com/compute/models/srgan) 5.92 MB
 
 | Runtime | Time     | Input                                       | Output                                              |
 |---------|----------|---------------------------------------------|-----------------------------------------------------|
@@ -27,4 +27,11 @@ Running [4xPurePhoto-Span](https://openmodeldb.info/models/4x-PurePhoto-span) 1.
 | Runtime | Time     | Input                                       | Output                                                       |
 |---------|----------|---------------------------------------------|--------------------------------------------------------------|
 | ONNX_RS | 288.42ms | <img src="images/sample_2.png" width="512"> | <img src="images/purephoto_span_onnx_rs_x4.png" width="512"> |
-| ORT     | 77.29ms | <img src="images/sample_2.png" width="512"> | <img src="images/purephoto_span_ort_x4.png" width="512">     |
+| ORT     | 77.29ms  | <img src="images/sample_2.png" width="512"> | <img src="images/purephoto_span_ort_x4.png" width="512">     |
+
+Running [4xClearRealityV1](https://openmodeldb.info/models/4x-ClearRealityV1) 1.63 MB
+
+| Runtime | Time     | Input                                       | Output                                                     |
+|---------|----------|---------------------------------------------|------------------------------------------------------------|
+| ONNX_RS | 297.34ms | <img src="images/sample_3.png" width="512"> | <img src="images/clearreality_onnx_rs_x4.png" width="512"> |
+| ORT     | 76.85ms  | <img src="images/sample_3.png" width="512"> | <img src="images/clearreality_ort_x4.png" width="512">     |
