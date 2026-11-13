@@ -4,7 +4,9 @@ use crate::ops::{
 };
 use crate::tensor::{Tensor, take_tensor};
 use anyhow::{Result, anyhow};
-use blas_rs::*;
+use blas_rs::GLOBAL_THREAD_POOL;
+use blas_rs::lvl3;
+use blas_rs::rayon::prelude::*;
 use std::arch::x86_64::{
     _CMP_LT_OQ, _mm256_add_ps, _mm256_blendv_ps, _mm256_cmp_ps, _mm256_div_ps, _mm256_loadu_ps,
     _mm256_max_ps, _mm256_min_ps, _mm256_mul_ps, _mm256_permute2f128_ps, _mm256_set1_ps,
@@ -738,10 +740,9 @@ fn conv(
         .ok_or_else(|| anyhow!("Conv: output buffer {n}*{m}*{p} overflows"))?;
 
     // tile over output rows so the im2col buffer stays bounded
-    // ~16 MB tile stays mostly L3-resident while the gemm reads it back
-    const COL_TILE_BUDGET: usize = 16 * 1024 * 1024;
+    // ~12 MB tile stays mostly L3-resident while the gemm reads it back
+    const COL_TILE_BUDGET: usize = 12 * 1024 * 1024;
     let budget_f32 = COL_TILE_BUDGET / size_of::<f32>();
-
     let tile_oh = match k_g.checked_mul(ow) {
         Some(k_ow) => (budget_f32 / k_ow).max(1).min(oh),
         None => 1,
@@ -751,92 +752,100 @@ fn conv(
     let col_len = k_g
         .checked_mul(tile_p_max)
         .ok_or_else(|| anyhow!("Conv: im2col buffer {k_g}*{tile_p_max} overflows"))?;
-    let ycm_len = m_g
-        .checked_mul(tile_p_max)
-        .ok_or_else(|| anyhow!("Conv: gemm buffer {m_g}*{tile_p_max} overflows"))?;
+    let mut col = vec![0f32; col_len]; // [p_tile, K_g] col-major col[k * p_tile + pix]
 
     let mut out = vec![0f32; out_len];
+    // prefill bias so gemm can run with beta = 1.0 (no separate bias pass)
+    if let Some(b) = bias {
+        for (i, plane) in out.chunks_mut(p).enumerate() {
+            plane.fill(b[i % m]);
+        }
+    }
 
-    // reuse a single im2col buffer across all groups and row tiles
-    // (max K per group = k_g <= k_total, max rows per tile = tile_oh)
-    let mut col = vec![0f32; col_len]; // [K_g, P_tile] column-major
-    let mut ycm = vec![0f32; ycm_len]; // [M_g, P_tile] column-major
+    // compute the number of pixels in a kernel,
+    // used for indexing into the input channels
+    let khw = kh * kw;
+    let xdata: &[f32] = &x.data;
 
     for ni in 0..n {
-        let xbase_n = ni * cin * hi * wi;
         for g in 0..group {
-            // weight slice for this group: W[g*m_g .. (g+1)*m_g, :] -> [M_g, K_g]
-            let w_start = g * m_g * k_g;
-            let w_end = w_start + m_g * k_g;
-            let wg = &w.data[w_start..w_end];
-
-            // input channel range for this group
+            let wg = &w.data[g * m_g * k_g..(g + 1) * m_g * k_g]; // col-major [K_g, M_g]
             let c_start = g * c_g;
-            // c_end = c_start + c_g
+            let outbase_g = ni * m * p + g * m_g * p;
 
-            // tile over output rows, the im2col buffer is reused across tiles, so
-            // padding positions must be written as explicit zeros, cuz skipping them
-            // would leave the previous tile's values in place
+            // tile over output rows so the im2col buffer stays bounded
             for tile in (0..oh).step_by(tile_oh) {
                 let oh_end = (tile + tile_oh).min(oh);
                 let p_tile = (oh_end - tile) * ow;
 
-                // im2col for this group + row band
-                let mut pcol = 0usize;
-                for ohi in tile..oh_end {
-                    for owi in 0..ow {
-                        let coloff = pcol * k_g;
-                        for ci in 0..c_g {
-                            let rowoff = coloff + ci * kh * kw;
-                            let xchan = xbase_n + (c_start + ci) * hi * wi;
-                            for khi in 0..kh {
-                                let ih = ohi * sh + khi * dh;
-                                let ih = ih as i64 - pt as i64;
-                                let hpad = !(0..hi as i64).contains(&ih);
-                                for kwi in 0..kw {
-                                    let iw = owi * sw + kwi * dw;
-                                    let iw = iw as i64 - pl as i64;
-                                    let idx = rowoff + khi * kw + kwi;
-                                    if hpad || !(0..wi as i64).contains(&iw) {
-                                        col[idx] = 0.0;
+                // TODO: this is god awful, but it works
+                // I don't understand convolution well enough to do better yet
+
+                // im2col, one task per k row, each row is contiguous copies
+                GLOBAL_THREAD_POOL.install(|| {
+                    col[..k_g * p_tile]
+                        .par_chunks_mut(p_tile)
+                        .enumerate()
+                        .for_each(|(k, dst)| {
+                            let ci = k / khw;
+                            let (khi, kwi) = ((k % khw) / kw, (k % khw) % kw);
+                            let xchan = &xdata[(ni * cin + c_start + ci) * hi * wi..][..hi * wi];
+
+                            // valid output-col range where the input col is inside the image
+                            let off = (kwi * dw) as i64 - pl as i64;
+                            let low_b = if off >= 0 {
+                                0
+                            } else {
+                                ((-off) as usize).div_ceil(sw)
+                            }
+                            .min(ow);
+                            let high_b = ((wi as i64 - off).max(0) as usize)
+                                .div_ceil(sw)
+                                .min(ow)
+                                .max(low_b);
+
+                            for ohi in tile..oh_end {
+                                let row = &mut dst[(ohi - tile) * ow..][..ow];
+                                let ih = (ohi * sh + khi * dh) as i64 - pt as i64;
+                                if ih < 0 || ih >= hi as i64 {
+                                    row.fill(0.0);
+                                    continue;
+                                }
+                                row[..low_b].fill(0.0);
+                                row[high_b..].fill(0.0);
+                                if high_b > low_b {
+                                    let src = &xchan[ih as usize * wi..][..wi];
+                                    let s0 = (low_b as i64 * sw as i64 + off) as usize;
+                                    if sw == 1 {
+                                        row[low_b..high_b]
+                                            .copy_from_slice(&src[s0..s0 + high_b - low_b]);
                                     } else {
-                                        col[idx] = x.data[xchan + ih as usize * wi + iw as usize];
+                                        for (t, d) in row[low_b..high_b].iter_mut().enumerate() {
+                                            *d = src[s0 + t * sw];
+                                        }
                                     }
                                 }
                             }
-                        }
-                        pcol += 1;
-                    }
-                }
+                        });
+                });
 
-                // gemm: Wg^T[M_g, K_g] · col[K_g, P_tile] = Yg[M_g, P_tile]
-                // Wg is row-major [M_g, K_g] -> treat as col-major [K_g, M_g] with trans_a
+                // C[P_tile x M_g] = col[P_tile x K_g] * Wg^T[K_g x M_g]
+                // C is column-major with ldc = p, which is exactly the NCHW plane layout
                 lvl3::gemm(
-                    m_g,
                     p_tile,
+                    m_g,
                     k_g,
                     1.0,
-                    wg,
-                    k_g, // lda = K_g for trans_a
                     &col[..k_g * p_tile],
+                    p_tile,
+                    wg,
                     k_g,
-                    0.0,
-                    &mut ycm[..m_g * p_tile],
-                    m_g,
-                    true,
+                    1.0, // bias already in out
+                    &mut out[outbase_g + tile * ow..],
+                    p,
+                    false,
                     false,
                 );
-
-                // scatter + bias
-                let bias_g = bias.map(|b| &b[g * m_g..(g + 1) * m_g]);
-                let outbase_g = ni * m * p + g * m_g * p;
-                for mi in 0..m_g {
-                    let add = bias_g.map_or(0.0, |b| b[mi]);
-                    for j in 0..p_tile {
-                        let (ohi, owi) = (tile + j / ow, j % ow);
-                        out[outbase_g + (mi * oh + ohi) * ow + owi] = ycm[j * m_g + mi] + add;
-                    }
-                }
             }
         }
     }

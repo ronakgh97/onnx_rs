@@ -40,3 +40,39 @@ pub fn save_image_from_tensor(data: &[f32], filename: &str) -> anyhow::Result<()
 
     Ok(())
 }
+
+pub fn assert_pixel_diff_within_tolerance(
+    image1: &image::RgbImage,
+    image2: &image::RgbImage,
+    tolerance: u8,
+) -> anyhow::Result<()> {
+    if image1.dimensions() != image2.dimensions() {
+        return Err(anyhow::anyhow!(
+            "image dimensions do not match: {:?} vs {:?}",
+            image1.dimensions(),
+            image2.dimensions()
+        ));
+    }
+
+    for (x, y, pixel1) in image1.enumerate_pixels() {
+        let pixel2 = image2.get_pixel(x, y);
+        let diff_r = (pixel1[0] as i16 - pixel2[0] as i16).unsigned_abs() as u8;
+        let diff_g = (pixel1[1] as i16 - pixel2[1] as i16).unsigned_abs() as u8;
+        let diff_b = (pixel1[2] as i16 - pixel2[2] as i16).unsigned_abs() as u8;
+
+        if diff_r > tolerance || diff_g > tolerance || diff_b > tolerance {
+            return Err(anyhow::anyhow!(
+                "pixel difference at ({}, {}): {:?} vs {:?}, diffs: r={}, g={}, b={}",
+                x,
+                y,
+                pixel1,
+                pixel2,
+                diff_r,
+                diff_g,
+                diff_b
+            ));
+        }
+    }
+
+    Ok(())
+}

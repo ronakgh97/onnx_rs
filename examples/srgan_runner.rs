@@ -1,6 +1,8 @@
 pub mod utils;
 
-use crate::utils::{fill_tensor_from_image, save_image_from_tensor};
+use crate::utils::{
+    assert_pixel_diff_within_tolerance, fill_tensor_from_image, save_image_from_tensor,
+};
 use anyhow::Result;
 use onnx_rs::{Model, Tensor};
 use ort::ep::CPU;
@@ -43,6 +45,12 @@ fn main() -> Result<()> {
     let (_, output) = output["upscaled_image"].try_extract_tensor::<f32>()?;
     save_image_from_tensor(output, "images/srgan_ort_x4.png")?;
     println!("done in : {:?}", start.elapsed());
+
+    assert_pixel_diff_within_tolerance(
+        &image::open("images/srgan_onnx_rs_x4.png")?.to_rgb8(),
+        &image::open("images/srgan_ort_x4.png")?.to_rgb8(),
+        1,
+    )?;
 
     Ok(())
 }

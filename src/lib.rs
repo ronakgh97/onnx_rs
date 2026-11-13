@@ -3,7 +3,7 @@
 //!
 //! Models are loaded from `.onnx` (must contain both graph and initializers)
 //! files or encoded bytes, validated while loading,
-//! and executed with [`Model::run`]. The public API keeps the
+//! and executed with [`Model::run_multiple`]. The public API keeps the
 //! runtime deliberately small: [`Model`] describes and runs a graph, while
 //! [`Tensor`] and [`TensorSpec`] represent its data and input/output shapes.
 //!
@@ -45,6 +45,7 @@ use prost::Message;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Instant;
 
 /// Represents a Node in the ONNX graph,
 /// which is an operator with its inputs, outputs, and attributes
@@ -122,8 +123,10 @@ impl Model {
         }
         scope.insert(self.inputs[0].name.as_ref(), data);
 
-        // walk the graph in topological order
-        Self::run_impl(&mut scope, &self.nodes)?;
+        let mut record_timings = HashMap::with_capacity(self.operators.len());
+
+        // walk & execute the graph in topological order
+        Self::run_impl(&self.nodes, &mut scope, &mut record_timings)?;
 
         let Some(t) = scope.get(self.outputs[0].name.as_ref()) else {
             return Err(anyhow!(
@@ -139,10 +142,13 @@ impl Model {
                 self.outputs[0].dims
             ));
         }
+
+        dbg!("timings: {:?}", record_timings);
+
         Ok(t.clone())
     }
     /// Run graph with the given feed of input tensors, returning the output tensors
-    pub fn run(&self, feed: HashMap<&str, Tensor>) -> Result<Vec<Tensor>> {
+    pub fn run_multiple(&self, feed: HashMap<&str, Tensor>) -> Result<Vec<Tensor>> {
         // validate feed, every declared input is provided,
         // and no extra inputs are given
         for spec in self.inputs.iter() {
@@ -174,8 +180,10 @@ impl Model {
             scope.insert(name, t);
         }
 
-        // walk the graph in topological order
-        Self::run_impl(&mut scope, &self.nodes)?;
+        let mut record_timings = HashMap::with_capacity(self.operators.len());
+
+        // walk & execute the graph in topological order
+        Self::run_impl(&self.nodes, &mut scope, &mut record_timings)?;
 
         // graph is done, collect outputs from scope
         let mut produced = Vec::with_capacity(self.outputs.len());
@@ -193,6 +201,9 @@ impl Model {
             }
             produced.push(t.clone());
         }
+
+        dbg!("timings: {:?}", record_timings);
+
         Ok(produced)
     }
     /// Get the IR version of the model
@@ -221,10 +232,14 @@ impl Model {
     }
 
     #[inline]
-    fn run_impl<'s>(scope: &mut HashMap<&'s str, Tensor>, nodes: &'s [Node]) -> Result<()> {
+    fn run_impl<'s>(
+        nodes: &'s [Node],
+        scope: &mut HashMap<&'s str, Tensor>,
+        timings: &mut HashMap<&str, f32>,
+    ) -> Result<()> {
         // walk the graph in topological order,
         // compute each node's output(s) and bind them to scope
-        let mut output_declared: Vec<&str> = Vec::with_capacity(4);
+        let mut output_declared: Vec<&str> = Vec::with_capacity(24);
         for node in nodes {
             // collect inputs first, avoids borrow conflict when inserting outputs
             let mut inputs: Vec<Option<&Tensor>> = Vec::with_capacity(node.inputs.len());
@@ -255,7 +270,17 @@ impl Model {
             //     node.op(),
             //     node.inputs_outputs(),
             // );
+
+            let start = Instant::now();
             let output_tensor = node.op.compute(&output_declared, &inputs, &node.attrs)?;
+            let end = start.elapsed().as_secs_f32();
+
+            // record timings for this operator
+            timings
+                .entry(node.op())
+                .and_modify(|t| *t += end)
+                .or_insert(end);
+
             if output_tensor.len() != output_declared.len() {
                 return Err(anyhow!(
                     "{}: operator '{:?}' produced {} outputs, declared {}",
@@ -613,6 +638,9 @@ fn decode_model(bytes: &[u8]) -> Result<Model> {
         })
         .map(|s| s.to_string())
         .collect();
+
+    // init blas-rs thread pool
+    blas_rs::init_thread_pool();
 
     Ok(Model {
         ir_version,
