@@ -784,54 +784,64 @@ fn conv(
                 // TODO: this is god awful, but it works
                 // I don't understand convolution well enough to do better yet
 
-                // TODO: Add parallelism threshold based on k * p_tile
-                // im2col, one task per k row, each row is contiguous copies
-                GLOBAL_THREAD_POOL.install(|| {
-                    col[..k_g * p_tile]
-                        .par_chunks_mut(p_tile)
-                        .enumerate()
-                        .for_each(|(k, dst)| {
-                            let ci = k / khw;
-                            let (khi, kwi) = ((k % khw) / kw, (k % khw) % kw);
-                            let xchan = &xdata[(ni * cin + c_start + ci) * hi * wi..][..hi * wi];
+                // fill one row of the im2col buffer for a given kernel index k
+                let fill_row = |k: usize, dst: &mut [f32]| {
+                    let ci = k / khw;
+                    let (khi, kwi) = ((k % khw) / kw, (k % khw) % kw);
+                    let xchan = &xdata[(ni * cin + c_start + ci) * hi * wi..][..hi * wi];
 
-                            // valid output-col range where the input col is inside the image
-                            let off = (kwi * dw) as i64 - pl as i64;
-                            let low_b = if off >= 0 {
-                                0
+                    // valid output-col range where the input col is inside the image
+                    let off = (kwi * dw) as i64 - pl as i64;
+                    let low_b = if off >= 0 {
+                        0
+                    } else {
+                        ((-off) as usize).div_ceil(sw)
+                    }
+                    .min(ow);
+                    let high_b = ((wi as i64 - off).max(0) as usize)
+                        .div_ceil(sw)
+                        .min(ow)
+                        .max(low_b);
+
+                    for ohi in tile..oh_end {
+                        let row = &mut dst[(ohi - tile) * ow..][..ow];
+                        let ih = (ohi * sh + khi * dh) as i64 - pt as i64;
+                        if ih < 0 || ih >= hi as i64 {
+                            row.fill(0.0);
+                            continue;
+                        }
+                        row[..low_b].fill(0.0);
+                        row[high_b..].fill(0.0);
+                        if high_b > low_b {
+                            let src = &xchan[ih as usize * wi..][..wi];
+                            let s0 = (low_b as i64 * sw as i64 + off) as usize;
+                            if sw == 1 {
+                                row[low_b..high_b].copy_from_slice(&src[s0..s0 + high_b - low_b]);
                             } else {
-                                ((-off) as usize).div_ceil(sw)
+                                for (t, d) in row[low_b..high_b].iter_mut().enumerate() {
+                                    *d = src[s0 + t * sw];
+                                }
                             }
-                            .min(ow);
-                            let high_b = ((wi as i64 - off).max(0) as usize)
-                                .div_ceil(sw)
-                                .min(ow)
-                                .max(low_b);
+                        }
+                    }
+                };
 
-                            for ohi in tile..oh_end {
-                                let row = &mut dst[(ohi - tile) * ow..][..ow];
-                                let ih = (ohi * sh + khi * dh) as i64 - pt as i64;
-                                if ih < 0 || ih >= hi as i64 {
-                                    row.fill(0.0);
-                                    continue;
-                                }
-                                row[..low_b].fill(0.0);
-                                row[high_b..].fill(0.0);
-                                if high_b > low_b {
-                                    let src = &xchan[ih as usize * wi..][..wi];
-                                    let s0 = (low_b as i64 * sw as i64 + off) as usize;
-                                    if sw == 1 {
-                                        row[low_b..high_b]
-                                            .copy_from_slice(&src[s0..s0 + high_b - low_b]);
-                                    } else {
-                                        for (t, d) in row[low_b..high_b].iter_mut().enumerate() {
-                                            *d = src[s0 + t * sw];
-                                        }
-                                    }
-                                }
-                            }
-                        });
-                });
+                // fill im2col, one task per k row, each row is contiguous copies
+                const PAR_IM2COL_THRESHOLD: usize = 1 << 17;
+                let col_tile = &mut col[..k_g * p_tile];
+                if k_g * p_tile < PAR_IM2COL_THRESHOLD {
+                    col_tile
+                        .chunks_mut(p_tile)
+                        .enumerate()
+                        .for_each(|(k, dst)| fill_row(k, dst));
+                } else {
+                    GLOBAL_THREAD_POOL.install(|| {
+                        col_tile
+                            .par_chunks_mut(p_tile)
+                            .enumerate()
+                            .for_each(|(k, dst)| fill_row(k, dst));
+                    });
+                }
 
                 // C[P_tile x M_g] = col[P_tile x K_g] * Wg^T[K_g x M_g]
                 // C is column-major with ldc = p, which is exactly the NCHW plane layout
@@ -1191,12 +1201,60 @@ fn sigmoid(output: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
     let x = take_tensor(inputs, 0, "Sigmoid")?;
     let n = x.data.len();
 
-    // TODO: AVX2 has no native exp instruction
     let mut data = Vec::with_capacity(n);
-    for (dst, &v) in data.spare_capacity_mut().iter_mut().zip(x.data.iter()) {
-        dst.write(1.0 / (1.0 + (-v).exp()));
-    }
+    let dst_ptr = data.spare_capacity_mut().as_mut_ptr() as *mut f32;
+    let src_ptr = x.data.as_ptr();
+
+    // y = 1 / (1 + exp(-x))
     unsafe {
+        let mut i = 0;
+        while i + 32 <= n {
+            let x0 = _mm256_loadu_ps(src_ptr.add(i));
+            let neg_x0 = _mm256_sub_ps(_mm256_set1_ps(0.0), x0);
+            let x1 = _mm256_loadu_ps(src_ptr.add(i + 8));
+            let neg_x1 = _mm256_sub_ps(_mm256_set1_ps(0.0), x1);
+            let x2 = _mm256_loadu_ps(src_ptr.add(i + 16));
+            let neg_x2 = _mm256_sub_ps(_mm256_set1_ps(0.0), x2);
+            let x3 = _mm256_loadu_ps(src_ptr.add(i + 24));
+            let neg_x3 = _mm256_sub_ps(_mm256_set1_ps(0.0), x3);
+
+            let exp_neg_x0 = avx_exp(neg_x0);
+            let exp_neg_x1 = avx_exp(neg_x1);
+            let exp_neg_x2 = avx_exp(neg_x2);
+            let exp_neg_x3 = avx_exp(neg_x3);
+
+            let denom0 = _mm256_add_ps(_mm256_set1_ps(1.0), exp_neg_x0);
+            let y0 = _mm256_div_ps(_mm256_set1_ps(1.0), denom0);
+            let denom1 = _mm256_add_ps(_mm256_set1_ps(1.0), exp_neg_x1);
+            let y1 = _mm256_div_ps(_mm256_set1_ps(1.0), denom1);
+            let denom2 = _mm256_add_ps(_mm256_set1_ps(1.0), exp_neg_x2);
+            let y2 = _mm256_div_ps(_mm256_set1_ps(1.0), denom2);
+            let denom3 = _mm256_add_ps(_mm256_set1_ps(1.0), exp_neg_x3);
+            let y3 = _mm256_div_ps(_mm256_set1_ps(1.0), denom3);
+
+            _mm256_storeu_ps(dst_ptr.add(i), y0);
+            _mm256_storeu_ps(dst_ptr.add(i + 16), y2);
+            _mm256_storeu_ps(dst_ptr.add(i + 8), y1);
+            _mm256_storeu_ps(dst_ptr.add(i + 24), y3);
+            i += 32
+        }
+        while i + 8 <= n {
+            let x0 = _mm256_loadu_ps(src_ptr.add(i));
+            let neg_x0 = _mm256_sub_ps(_mm256_set1_ps(0.0), x0);
+            let exp_neg_x0 = avx_exp(neg_x0);
+            let denom0 = _mm256_add_ps(_mm256_set1_ps(1.0), exp_neg_x0);
+            let y0 = _mm256_div_ps(_mm256_set1_ps(1.0), denom0);
+            _mm256_storeu_ps(dst_ptr.add(i), y0);
+            i += 8;
+        }
+        while i < n {
+            let x_val = *src_ptr.add(i);
+            let exp_neg_x = (-x_val).exp();
+            let y_val = 1.0 / (1.0 + exp_neg_x);
+            *dst_ptr.add(i) = y_val;
+            i += 1;
+        }
+
         data.set_len(n);
     }
 
@@ -1204,28 +1262,25 @@ fn sigmoid(output: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
 }
 
 #[inline(always)]
-fn axv_exp(x: __m256) -> __m256 {
+fn avx_exp(x: __m256) -> __m256 {
     unsafe {
-        let zero = _mm256_set1_ps(0.0);
-        let neg_x = _mm256_sub_ps(zero, x);
-
-        // clamp to avoid overflow in exp
-        let max_val = _mm256_set1_ps(88.72284);
-        let min_val = _mm256_set1_ps(-87.33654);
-        let neg_x = _mm256_min_ps(_mm256_max_ps(neg_x, min_val), max_val);
+        // clamp to avoid overflow/underflow in exp
+        let max_val = _mm256_set1_ps(f32::MAX.ln()); // 88.72
+        let min_val = _mm256_set1_ps(f32::MIN_POSITIVE.ln()); // -87.34
+        let x = _mm256_min_ps(_mm256_max_ps(x, min_val), max_val);
 
         // consts
-        let v_log2e = _mm256_set1_ps(std::f32::consts::LOG2_E);
-        let v_ln2_hi = _mm256_set1_ps(std::f32::consts::LN_2);
-        let v_ln2_lo = _mm256_set1_ps(1.428606765330187e-6);
+        let v_log2e = _mm256_set1_ps(std::f32::consts::LOG2_E); // 1.44269504
+        let v_ln2_hi = _mm256_set1_ps(std::f32::consts::LN_2); // 0.69314718
+        let v_ln2_lo = _mm256_set1_ps(1.428_606_8e-6);
 
-        // fx = round(neg_x * log2(e))
-        let fx = _mm256_round_ps(_mm256_mul_ps(neg_x, v_log2e), _MM_FROUND_CUR_DIRECTION);
+        // fx = round(x * log2(e))
+        let fx = _mm256_round_ps(_mm256_mul_ps(x, v_log2e), _MM_FROUND_CUR_DIRECTION);
         let k = _mm256_cvtps_epi32(fx);
 
-        // r = (neg_x - fx * LN2_HI) - fx * LN2_LO
+        // r = x - fx * ln2_hi - fx * ln2_lo
         let r = _mm256_sub_ps(
-            _mm256_sub_ps(neg_x, _mm256_mul_ps(fx, v_ln2_hi)),
+            _mm256_sub_ps(x, _mm256_mul_ps(fx, v_ln2_hi)),
             _mm256_mul_ps(fx, v_ln2_lo),
         );
 
@@ -1234,21 +1289,17 @@ fn axv_exp(x: __m256) -> __m256 {
         p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(0.00833675));
         p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(0.04166397));
         p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(0.16666655));
-        p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(0.50000000));
-        p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(1.00000000));
-        p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(1.00000000));
+        p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(0.5));
+        p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(1.0));
+        p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(1.0));
 
         // reconstruct 2^k by bit-shifting directly into IEEE-754 exponent bits
         let bias = _mm256_set1_epi32(127);
         let ik = _mm256_add_epi32(k, bias);
         let pow2k = _mm256_castsi256_ps(_mm256_slli_epi32(ik, 23));
 
-        // sigmoid computation 1.0 / (1.0 + exp(-x))
-        let one = _mm256_set1_ps(1.0);
-        let exp_val = _mm256_mul_ps(p, pow2k);
-        let denom = _mm256_add_ps(one, exp_val);
-
-        _mm256_div_ps(one, denom)
+        // multiply polynomial result by 2^k to get exp(x)
+        _mm256_mul_ps(p, pow2k)
     }
 }
 
@@ -1307,7 +1358,7 @@ fn concat(
         axis_total += t.dims[axis];
     }
 
-    // compute output dims, and the outer/inner sizes for the copy loops
+    // update the output dims to reflect the concatenation along 'axis'
     let mut out_dims = first.dims.to_vec();
     out_dims[axis] = axis_total;
 
