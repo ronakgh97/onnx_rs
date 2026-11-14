@@ -112,7 +112,7 @@ pub enum Operator {
     Conv, Gemm, MatMul, MaxPool,
     AveragePool, Sigmoid, Flatten, Transpose,
     Softmax, Add, Sub, Mul, Div, 
-    Concat, SoftPlus
+    Concat, SoftPlus, ReduceMean, Tanh,
 
 }
 
@@ -133,7 +133,7 @@ impl Operator {
             Operator::Conv => "Conv", Operator::Gemm => "Gemm", Operator::MatMul => "MatMul", Operator::MaxPool => "MaxPool",
             Operator::AveragePool => "AveragePool", Operator::Sigmoid => "Sigmoid", Operator::Flatten => "Flatten", Operator::Transpose => "Transpose",
             Operator::Softmax => "Softmax", Operator::Add => "Add", Operator::Sub => "Sub", Operator::Mul => "Mul", Operator::Div => "Div",
-            Operator::Concat => "Concat", Operator::SoftPlus => "SoftPlus"
+            Operator::Concat => "Concat", Operator::SoftPlus => "Softplus", Operator::ReduceMean => "ReduceMean", Operator::Tanh => "Tanh"
         }
     }
 
@@ -145,7 +145,7 @@ impl Operator {
             "Conv" => Operator::Conv, "Gemm" => Operator::Gemm, "MatMul" => Operator::MatMul, "MaxPool" => Operator::MaxPool,
             "AveragePool" => Operator::AveragePool, "Sigmoid" => Operator::Sigmoid, "Flatten" => Operator::Flatten, "Transpose" => Operator::Transpose,
             "Softmax" => Operator::Softmax, "Add" => Operator::Add, "Sub" => Operator::Sub, "Mul" => Operator::Mul, "Div" => Operator::Div,
-            "Concat" => Operator::Concat, "SoftPlus" => Operator::SoftPlus,
+            "Concat" => Operator::Concat, "Softplus" => Operator::SoftPlus, "ReduceMean" => Operator::ReduceMean, "Tanh" => Operator::Tanh,
             _ => return None,
         };
         Some(op)
@@ -293,6 +293,21 @@ impl Operator {
                 attrs: &[("axis", AttributesDataKind::I64)],
             },
             Operator::SoftPlus => OperatorSpec {
+                min_opset: 13,
+                arity_in: (1, 1),
+                arity_out: (1, 1),
+                attrs: &[],
+            },
+            Operator::ReduceMean => OperatorSpec {
+                min_opset: 13,
+                arity_in: (1, 1),
+                arity_out: (1, 1),
+                attrs: &[
+                    ("axes", AttributesDataKind::Ints),
+                    ("keepdims", AttributesDataKind::I64),
+                ],
+            },
+            Operator::Tanh => OperatorSpec {
                 min_opset: 13,
                 arity_in: (1, 1),
                 arity_out: (1, 1),

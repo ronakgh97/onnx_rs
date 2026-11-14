@@ -51,6 +51,7 @@ impl Operator {
             Operator::Sigmoid => Ok(vec![sigmoid(output_names[0], inputs)?]),
             Operator::Concat => Ok(vec![concat(output_names[0], inputs, attrs)?]),
             Operator::SoftPlus => Ok(vec![softplus(output_names[0], inputs)?]),
+            Operator::Tanh => Ok(vec![tanh(output_names[0], inputs)?]),
             _ => Err(anyhow!(
                 "operator '{:?}' has no kernel implemented yet",
                 self
@@ -1252,6 +1253,61 @@ fn sigmoid(output: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
             let exp_neg_x = (-x_val).exp();
             let y_val = 1.0 / (1.0 + exp_neg_x);
             *dst_ptr.add(i) = y_val;
+            i += 1;
+        }
+
+        data.set_len(n);
+    }
+
+    Tensor::create(output, &x.dims, data)
+}
+
+#[inline]
+fn tanh(output: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
+    let x = take_tensor(inputs, 0, "Tanh")?;
+    let n = x.data.len();
+
+    let mut data = Vec::with_capacity(n);
+    let dst_ptr = data.spare_capacity_mut().as_mut_ptr() as *mut f32;
+    let src_ptr = x.data.as_ptr();
+
+    // tanh(x) = (e^(2x) - 1) / (e^(2x) + 1)
+    unsafe {
+        let one = _mm256_set1_ps(1.0);
+        let mut i = 0;
+        while i + 32 <= n {
+            let x0 = _mm256_loadu_ps(src_ptr.add(i));
+            let x1 = _mm256_loadu_ps(src_ptr.add(i + 8));
+            let x2 = _mm256_loadu_ps(src_ptr.add(i + 16));
+            let x3 = _mm256_loadu_ps(src_ptr.add(i + 24));
+
+            let e0 = avx_exp(_mm256_add_ps(x0, x0)); // 2x
+            let e1 = avx_exp(_mm256_add_ps(x1, x1));
+            let e2 = avx_exp(_mm256_add_ps(x2, x2));
+            let e3 = avx_exp(_mm256_add_ps(x3, x3));
+
+            let y0 = _mm256_div_ps(_mm256_sub_ps(e0, one), _mm256_add_ps(e0, one));
+            let y1 = _mm256_div_ps(_mm256_sub_ps(e1, one), _mm256_add_ps(e1, one));
+            let y2 = _mm256_div_ps(_mm256_sub_ps(e2, one), _mm256_add_ps(e2, one));
+            let y3 = _mm256_div_ps(_mm256_sub_ps(e3, one), _mm256_add_ps(e3, one));
+
+            _mm256_storeu_ps(dst_ptr.add(i), y0);
+            _mm256_storeu_ps(dst_ptr.add(i + 16), y2);
+            _mm256_storeu_ps(dst_ptr.add(i + 8), y1);
+            _mm256_storeu_ps(dst_ptr.add(i + 24), y3);
+            i += 32;
+        }
+        while i + 8 <= n {
+            let x0 = _mm256_loadu_ps(src_ptr.add(i));
+            let e0 = avx_exp(_mm256_add_ps(x0, x0));
+            let y0 = _mm256_div_ps(_mm256_sub_ps(e0, one), _mm256_add_ps(e0, one));
+            _mm256_storeu_ps(dst_ptr.add(i), y0);
+            i += 8;
+        }
+        while i < n {
+            let v = (*src_ptr.add(i)).clamp(-44.0, 44.0);
+            let e = (2.0 * v).exp();
+            *dst_ptr.add(i) = (e - 1.0) / (e + 1.0);
             i += 1;
         }
 
