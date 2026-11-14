@@ -1303,6 +1303,25 @@ fn avx_exp(x: __m256) -> __m256 {
     }
 }
 
+#[inline(always)]
+fn avx_ln1p(t: __m256) -> __m256 {
+    unsafe {
+        let two = _mm256_set1_ps(2.0);
+
+        let z = _mm256_div_ps(t, _mm256_add_ps(two, t));
+        let z2 = _mm256_mul_ps(z, z);
+
+        let mut inner = _mm256_set1_ps(1.0 / 11.0);
+        inner = _mm256_fmadd_ps(inner, z2, _mm256_set1_ps(1.0 / 9.0));
+        inner = _mm256_fmadd_ps(inner, z2, _mm256_set1_ps(1.0 / 7.0));
+        inner = _mm256_fmadd_ps(inner, z2, _mm256_set1_ps(1.0 / 5.0));
+        inner = _mm256_fmadd_ps(inner, z2, _mm256_set1_ps(1.0 / 3.0));
+        inner = _mm256_fmadd_ps(inner, z2, _mm256_set1_ps(1.0));
+
+        _mm256_mul_ps(_mm256_mul_ps(z, inner), two)
+    }
+}
+
 #[inline]
 fn concat(
     output: &str,
@@ -1410,12 +1429,60 @@ fn softplus(output: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
     let x = take_tensor(inputs, 0, "SoftPlus")?;
     let n = x.data.len();
 
-    // TODO: AVX2 has no native exp or ln instruction
     let mut data = Vec::with_capacity(n);
-    for (dst, &v) in data.spare_capacity_mut().iter_mut().zip(x.data.iter()) {
-        dst.write((v.exp() + 1.0).ln());
-    }
+    let dst_ptr = data.spare_capacity_mut().as_mut_ptr() as *mut f32;
+    let src_ptr = x.data.as_ptr();
+
+    // softplus(x) = ln(1 + exp(x)) = max(x, 0) + ln1p(exp(-|x|))
+    // for x >= 0: x + ln(1 + exp(-x)) = ln(e^x + 1)
+    // for x <  0: 0 + ln(1 + exp(x))
+    // the exp argument -|x|, i.e. min(x, -x) is never positive, so exp cannot overflow
     unsafe {
+        let zero = _mm256_setzero_ps();
+        let mut i = 0;
+        while i + 32 <= n {
+            let x0 = _mm256_loadu_ps(src_ptr.add(i));
+            let x1 = _mm256_loadu_ps(src_ptr.add(i + 8));
+            let x2 = _mm256_loadu_ps(src_ptr.add(i + 16));
+            let x3 = _mm256_loadu_ps(src_ptr.add(i + 24));
+
+            // -|x| = min(x, -x), the exp argument
+            let e0 = _mm256_min_ps(x0, _mm256_sub_ps(zero, x0));
+            let e1 = _mm256_min_ps(x1, _mm256_sub_ps(zero, x1));
+            let e2 = _mm256_min_ps(x2, _mm256_sub_ps(zero, x2));
+            let e3 = _mm256_min_ps(x3, _mm256_sub_ps(zero, x3));
+
+            let l0 = avx_ln1p(avx_exp(e0));
+            let l1 = avx_ln1p(avx_exp(e1));
+            let l2 = avx_ln1p(avx_exp(e2));
+            let l3 = avx_ln1p(avx_exp(e3));
+
+            let y0 = _mm256_add_ps(_mm256_max_ps(x0, zero), l0);
+            let y1 = _mm256_add_ps(_mm256_max_ps(x1, zero), l1);
+            let y2 = _mm256_add_ps(_mm256_max_ps(x2, zero), l2);
+            let y3 = _mm256_add_ps(_mm256_max_ps(x3, zero), l3);
+
+            _mm256_storeu_ps(dst_ptr.add(i), y0);
+            _mm256_storeu_ps(dst_ptr.add(i + 16), y2);
+            _mm256_storeu_ps(dst_ptr.add(i + 8), y1);
+            _mm256_storeu_ps(dst_ptr.add(i + 24), y3);
+            i += 32;
+        }
+        while i + 8 <= n {
+            let x0 = _mm256_loadu_ps(src_ptr.add(i));
+            let e0 = _mm256_min_ps(x0, _mm256_sub_ps(zero, x0));
+            let l0 = avx_ln1p(avx_exp(e0));
+            let y0 = _mm256_add_ps(_mm256_max_ps(x0, zero), l0);
+            _mm256_storeu_ps(dst_ptr.add(i), y0);
+            i += 8;
+        }
+        while i < n {
+            let v = *src_ptr.add(i);
+            let y = v.max(0.0) + (-v.abs()).exp().ln_1p();
+            *dst_ptr.add(i) = y;
+            i += 1;
+        }
+
         data.set_len(n);
     }
 
