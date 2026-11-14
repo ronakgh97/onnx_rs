@@ -143,7 +143,7 @@ impl Model {
             ));
         }
 
-        dbg!("timings: {:?}", record_timings);
+        // dbg!("timings: {:?}", record_timings);
 
         Ok(t.clone())
     }
@@ -202,7 +202,7 @@ impl Model {
             produced.push(t.clone());
         }
 
-        dbg!("timings: {:?}", record_timings);
+        // dbg!("timings: {:?}", record_timings);
 
         Ok(produced)
     }

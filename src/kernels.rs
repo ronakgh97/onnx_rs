@@ -8,9 +8,11 @@ use blas_rs::GLOBAL_THREAD_POOL;
 use blas_rs::lvl3;
 use blas_rs::rayon::prelude::*;
 use std::arch::x86_64::{
-    _CMP_LT_OQ, _mm256_add_ps, _mm256_blendv_ps, _mm256_cmp_ps, _mm256_div_ps, _mm256_loadu_ps,
-    _mm256_max_ps, _mm256_min_ps, _mm256_mul_ps, _mm256_permute2f128_ps, _mm256_set1_ps,
-    _mm256_setzero_ps, _mm256_shuffle_ps, _mm256_storeu_ps, _mm256_sub_ps, _mm256_unpackhi_ps,
+    __m256, _CMP_LT_OQ, _MM_FROUND_CUR_DIRECTION, _mm256_add_epi32, _mm256_add_ps,
+    _mm256_blendv_ps, _mm256_castsi256_ps, _mm256_cmp_ps, _mm256_cvtps_epi32, _mm256_div_ps,
+    _mm256_fmadd_ps, _mm256_loadu_ps, _mm256_max_ps, _mm256_min_ps, _mm256_mul_ps,
+    _mm256_permute2f128_ps, _mm256_round_ps, _mm256_set1_epi32, _mm256_set1_ps, _mm256_setzero_ps,
+    _mm256_shuffle_ps, _mm256_slli_epi32, _mm256_storeu_ps, _mm256_sub_ps, _mm256_unpackhi_ps,
     _mm256_unpacklo_ps,
 };
 
@@ -48,6 +50,7 @@ impl Operator {
             Operator::Div => Ok(vec![div(output_names[0], inputs)?]),
             Operator::Sigmoid => Ok(vec![sigmoid(output_names[0], inputs)?]),
             Operator::Concat => Ok(vec![concat(output_names[0], inputs, attrs)?]),
+            Operator::SoftPlus => Ok(vec![softplus(output_names[0], inputs)?]),
             _ => Err(anyhow!(
                 "operator '{:?}' has no kernel implemented yet",
                 self
@@ -741,7 +744,7 @@ fn conv(
 
     // tile over output rows so the im2col buffer stays bounded
     // ~12 MB tile stays mostly L3-resident while the gemm reads it back
-    const COL_TILE_BUDGET: usize = 12 * 1024 * 1024;
+    const COL_TILE_BUDGET: usize = 12 << 20;
     let budget_f32 = COL_TILE_BUDGET / size_of::<f32>();
     let tile_oh = match k_g.checked_mul(ow) {
         Some(k_ow) => (budget_f32 / k_ow).max(1).min(oh),
@@ -781,6 +784,7 @@ fn conv(
                 // TODO: this is god awful, but it works
                 // I don't understand convolution well enough to do better yet
 
+                // TODO: Add parallelism threshold based on k * p_tile
                 // im2col, one task per k row, each row is contiguous copies
                 GLOBAL_THREAD_POOL.install(|| {
                     col[..k_g * p_tile]
@@ -1199,6 +1203,55 @@ fn sigmoid(output: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
     Tensor::create(output, &x.dims, data)
 }
 
+#[inline(always)]
+fn axv_exp(x: __m256) -> __m256 {
+    unsafe {
+        let zero = _mm256_set1_ps(0.0);
+        let neg_x = _mm256_sub_ps(zero, x);
+
+        // clamp to avoid overflow in exp
+        let max_val = _mm256_set1_ps(88.72284);
+        let min_val = _mm256_set1_ps(-87.33654);
+        let neg_x = _mm256_min_ps(_mm256_max_ps(neg_x, min_val), max_val);
+
+        // consts
+        let v_log2e = _mm256_set1_ps(std::f32::consts::LOG2_E);
+        let v_ln2_hi = _mm256_set1_ps(std::f32::consts::LN_2);
+        let v_ln2_lo = _mm256_set1_ps(1.428606765330187e-6);
+
+        // fx = round(neg_x * log2(e))
+        let fx = _mm256_round_ps(_mm256_mul_ps(neg_x, v_log2e), _MM_FROUND_CUR_DIRECTION);
+        let k = _mm256_cvtps_epi32(fx);
+
+        // r = (neg_x - fx * LN2_HI) - fx * LN2_LO
+        let r = _mm256_sub_ps(
+            _mm256_sub_ps(neg_x, _mm256_mul_ps(fx, v_ln2_hi)),
+            _mm256_mul_ps(fx, v_ln2_lo),
+        );
+
+        // degree-6 minimax polynomial for exp(r) via Horner's method
+        let mut p = _mm256_set1_ps(0.00138889);
+        p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(0.00833675));
+        p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(0.04166397));
+        p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(0.16666655));
+        p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(0.50000000));
+        p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(1.00000000));
+        p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(1.00000000));
+
+        // reconstruct 2^k by bit-shifting directly into IEEE-754 exponent bits
+        let bias = _mm256_set1_epi32(127);
+        let ik = _mm256_add_epi32(k, bias);
+        let pow2k = _mm256_castsi256_ps(_mm256_slli_epi32(ik, 23));
+
+        // sigmoid computation 1.0 / (1.0 + exp(-x))
+        let one = _mm256_set1_ps(1.0);
+        let exp_val = _mm256_mul_ps(p, pow2k);
+        let denom = _mm256_add_ps(one, exp_val);
+
+        _mm256_div_ps(one, denom)
+    }
+}
+
 #[inline]
 fn concat(
     output: &str,
@@ -1299,4 +1352,21 @@ fn concat(
     }
 
     Tensor::create(output, &out_dims, data)
+}
+
+#[inline]
+fn softplus(output: &str, inputs: &[Option<&Tensor>]) -> Result<Tensor> {
+    let x = take_tensor(inputs, 0, "SoftPlus")?;
+    let n = x.data.len();
+
+    // TODO: AVX2 has no native exp or ln instruction
+    let mut data = Vec::with_capacity(n);
+    for (dst, &v) in data.spare_capacity_mut().iter_mut().zip(x.data.iter()) {
+        dst.write((v.exp() + 1.0).ln());
+    }
+    unsafe {
+        data.set_len(n);
+    }
+
+    Tensor::create(output, &x.dims, data)
 }
